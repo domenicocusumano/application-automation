@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Job Pipeline</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0f0f17;
+    color: #d4d4d8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #1e1e2e;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #e4e4e7;
+    letter-spacing: 0.02em;
+  }
+  header .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #3b82f6;
+  }
+
+  nav {
+    display: flex;
+    gap: 2px;
+    padding: 12px 24px 0;
+    border-bottom: 1px solid #1e1e2e;
+    flex-shrink: 0;
+  }
+  nav button {
+    background: none;
+    border: none;
+    color: #71717a;
+    font-size: 13px;
+    padding: 8px 16px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s;
+  }
+  nav button:hover { color: #a1a1aa; }
+  nav button.active {
+    color: #e4e4e7;
+    border-bottom-color: #3b82f6;
+  }
+
+  .panel {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    padding: 24px;
+    overflow: hidden;
+    min-height: 0;
+  }
+  .panel.active { display: flex; }
+
+  /* ── RUN PANEL ── */
+  #panel-run { gap: 16px; }
+
+  .run-controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+
+  #run-btn {
+    background: #3b82f6;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  #run-btn:hover:not(:disabled) { background: #2563eb; }
+  #run-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  #cancel-btn {
+    background: #18181f;
+    color: #f87171;
+    border: 1px solid #3f1f1f;
+    border-radius: 6px;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #cancel-btn:hover { background: #2a1010; border-color: #f87171; }
+
+  #run-status {
+    font-size: 13px;
+    color: #71717a;
+  }
+  #run-status.running { color: #facc15; }
+  #run-status.done    { color: #4ade80; }
+  #run-status.error   { color: #f87171; }
+
+  /* ── SETTINGS FIELDS ── */
+  .settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    max-width: 580px;
+  }
+  .field-label {
+    font-size: 13px;
+    color: #e4e4e7;
+    font-weight: 500;
+  }
+  .field-desc {
+    font-size: 12px;
+    color: #52525b;
+    line-height: 1.55;
+  }
+  .settings-subsection {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding-left: 18px;
+    border-left: 2px solid #1e1e2e;
+  }
+  .number-input {
+    width: 80px;
+    background: #0a0a12;
+    border: 1px solid #1e1e2e;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #d4d4d8;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .number-input:focus { border-color: #3b82f6; }
+  .text-input-sm {
+    background: #0a0a12;
+    border: 1px solid #1e1e2e;
+    border-radius: 6px;
+    padding: 7px 10px;
+    color: #d4d4d8;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s;
+    max-width: 260px;
+  }
+  .text-input-sm:focus { border-color: #3b82f6; }
+
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #a1a1aa;
+    cursor: pointer;
+    user-select: none;
+  }
+  .checkbox-label input[type="checkbox"] {
+    accent-color: #3b82f6;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+  }
+
+  .session-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .session-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #52525b;
+    flex-shrink: 0;
+  }
+  .session-dot.valid   { background: #4ade80; }
+  .session-dot.invalid { background: #f87171; }
+  #session-label {
+    font-size: 13px;
+    color: #71717a;
+  }
+  #relogin-btn {
+    background: #f87171;
+    color: #0f0f17;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+    display: none;
+  }
+  #relogin-btn:hover { background: #ef4444; }
+  #relogin-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #log {
+    flex: 1;
+    background: #0a0a12;
+    border: 1px solid #1e1e2e;
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-family: "SF Mono", "Fira Code", "Menlo", monospace;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: #a1f7a1;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    min-height: 0;
+  }
+  #log .dim   { color: #52525b; }
+  #log .warn  { color: #facc15; }
+  #log .error { color: #f87171; }
+
+  /* ── PROMPT PANELS ── */
+  .prompt-panel { gap: 12px; }
+
+  .prompt-meta {
+    font-size: 12px;
+    color: #52525b;
+    flex-shrink: 0;
+  }
+
+  textarea {
+    flex: 1;
+    background: #0a0a12;
+    border: 1px solid #1e1e2e;
+    border-radius: 8px;
+    padding: 14px 16px;
+    color: #d4d4d8;
+    font-family: "SF Mono", "Fira Code", "Menlo", monospace;
+    font-size: 12.5px;
+    line-height: 1.6;
+    resize: none;
+    outline: none;
+    min-height: 0;
+    transition: border-color 0.15s;
+  }
+  textarea:focus { border-color: #3b82f6; }
+
+  .save-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .save-btn {
+    background: #18181f;
+    color: #e4e4e7;
+    border: 1px solid #2e2e3e;
+    border-radius: 6px;
+    padding: 8px 20px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .save-btn:hover { background: #222230; border-color: #3b82f6; }
+  .save-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .save-status {
+    font-size: 12px;
+    color: #52525b;
+    transition: color 0.3s;
+  }
+  .save-status.saved { color: #4ade80; }
+  .save-status.error { color: #f87171; }
+
+  /* ── RESUME PANEL ── */
+  #panel-resume { gap: 12px; }
+
+  /* ── SETTINGS PANEL ── */
+  #panel-settings {
+    gap: 28px;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .settings-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #52525b;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1e1e2e;
+  }
+  .url-input {
+    background: #0a0a12;
+    border: 1px solid #1e1e2e;
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: #d4d4d8;
+    font-size: 13px;
+    font-family: "SF Mono", "Fira Code", "Menlo", monospace;
+    outline: none;
+    transition: border-color 0.15s;
+    max-width: 580px;
+    width: 100%;
+  }
+  .url-input:focus { border-color: #3b82f6; }
+
+  .textarea-input {
+    background: #0a0a12;
+    border: 1px solid #1e1e2e;
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: #d4d4d8;
+    font-size: 13px;
+    font-family: "SF Mono", "Fira Code", "Menlo", monospace;
+    outline: none;
+    resize: vertical;
+    transition: border-color 0.15s;
+    max-width: 580px;
+    width: 100%;
+    line-height: 1.5;
+  }
+  .textarea-input:focus { border-color: #3b82f6; }
+
+  .resume-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .upload-btn {
+    background: #18181f;
+    color: #e4e4e7;
+    border: 1px solid #2e2e3e;
+    border-radius: 6px;
+    padding: 8px 20px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .upload-btn:hover { background: #222230; border-color: #3b82f6; }
+  .upload-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #resume-text {
+    flex: 1;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="dot"></div>
+  <h1>Job Pipeline</h1>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('run')">Run</button>
+  <button onclick="showTab('background')">Background Prompt</button>
+  <button onclick="showTab('resume')">Resume</button>
+  <button onclick="showTab('settings')">Settings</button>
+</nav>
+
+<div id="panel-run" class="panel active" id="panel-run">
+  <div class="run-controls">
+    <button id="run-btn" onclick="runPipeline()" disabled>Run Pipeline</button>
+    <button id="cancel-btn" onclick="cancelPipeline()" style="display:none">Cancel</button>
+    <span id="run-status">Ready</span>
+    <div class="session-control">
+      <div class="session-dot" id="session-dot"></div>
+      <span id="session-label">Checking session...</span>
+      <button id="relogin-btn" onclick="startRelogin()">Re-login LinkedIn</button>
+    </div>
+  </div>
+  <div id="log"><span class="dim">Output will appear here...</span></div>
+</div>
+
+<div id="panel-background" class="panel prompt-panel">
+  <div class="prompt-meta">background_prompt.txt — loaded on every pipeline run</div>
+  <textarea id="ta-background" spellcheck="false"></textarea>
+  <div class="save-row">
+    <button class="save-btn" onclick="savePrompt('background')">Save</button>
+    <span id="status-background" class="save-status"></span>
+  </div>
+</div>
+
+<div id="panel-resume" class="panel prompt-panel">
+  <div class="prompt-meta">Dom_Cusumano_General_Resume (.pdf or .docx) — used as the source resume for every tailored build</div>
+  <div class="resume-controls">
+    <input type="file" id="resume-file-input" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none" onchange="uploadResume()">
+    <button class="upload-btn" onclick="document.getElementById('resume-file-input').click()">Upload New Resume</button>
+    <span id="status-resume" class="save-status"></span>
+  </div>
+  <textarea id="resume-text" readonly spellcheck="false"></textarea>
+</div>
+
+<div id="panel-settings" class="panel">
+
+  <!-- ── Pipeline ── -->
+  <div class="settings-section">
+    <div class="settings-section-title">Pipeline</div>
+    <div class="settings-field">
+      <span class="field-label">Score threshold</span>
+      <div class="field-desc">Minimum score (0–10) Claude must give a job in the resume-building phase for it to be accepted. Lower = more jobs processed; higher = more selective.</div>
+      <input type="number" id="threshold-input" class="number-input" min="0" max="10" step="0.1">
+    </div>
+  </div>
+
+  <!-- ── Scoring & Filters ── -->
+  <div class="settings-section">
+    <div class="settings-section-title">Scoring &amp; Filters</div>
+    <div class="settings-field">
+      <span class="field-label">Seniority tiers</span>
+      <div class="field-desc">Keywords that boost a job's score. Listed top-to-bottom: first entry = highest score bonus. Jobs without any keyword are <em>not</em> excluded — they just score lower (base 3.0/10). One keyword or phrase per line.</div>
+      <textarea id="seniority-tiers-input" class="textarea-input" rows="8"
+                placeholder="vp&#10;vice president&#10;director&#10;principal&#10;staff&#10;lead&#10;senior"></textarea>
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Location preferences</span>
+      <div class="field-desc">Comma-separated location keywords (case-insensitive). Jobs whose location doesn't match any keyword are filtered out before scoring. "United States" with no major city name is always kept as likely-remote.</div>
+      <input type="text" id="preferred-locations-input" class="text-input-sm"
+             placeholder="remote, miami">
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Salary minimum ($)</span>
+      <div class="field-desc">Minimum acceptable annual salary. Only applies when a listing includes structured salary data. Set to 0 to disable. (Most LinkedIn and Built-in listings don't include salary — this is for future use.)</div>
+      <input type="number" id="salary-minimum-input" class="number-input" min="0" step="1000">
+    </div>
+  </div>
+
+  <!-- ── LinkedIn ── -->
+  <div class="settings-section">
+    <div class="settings-section-title">LinkedIn</div>
+    <div class="settings-field">
+      <label class="checkbox-label">
+        <input type="checkbox" id="linkedin-enabled-cb">
+        Enable LinkedIn scraper
+      </label>
+      <div class="field-desc">Runs the LinkedIn Recommended feed (Phase 1) and keyword search (Phase 2). Uncheck to skip all LinkedIn scraping in the pipeline.</div>
+    </div>
+    <div class="settings-subsection">
+      <div class="settings-field">
+        <label class="checkbox-label">
+          <input type="checkbox" id="top-applicant-cb">
+          Top Applicant
+        </label>
+        <div class="field-desc">Also scrapes the LinkedIn Top Applicant collection (Phase 0) before the Recommended feed. Requires LinkedIn Premium.</div>
+      </div>
+      <div class="settings-field">
+        <span class="field-label">Search term</span>
+        <div class="field-desc">Keywords used for the Phase 2 LinkedIn job search. Change this to broaden or narrow the types of roles LinkedIn returns.</div>
+        <input type="text" id="linkedin-search-input" class="text-input-sm"
+               placeholder="Product Manager">
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Built-in ── -->
+  <div class="settings-section">
+    <div class="settings-section-title">Built-in</div>
+    <div class="settings-field">
+      <label class="checkbox-label">
+        <input type="checkbox" id="builtin-enabled-cb" onchange="updateRunBtnState()">
+        Enable Built-in scraper
+      </label>
+      <div class="field-desc">When enabled, Run Pipeline scrapes Built-in.com instead of LinkedIn — both cannot run simultaneously. The LinkedIn pipeline is skipped entirely.</div>
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Search URL</span>
+      <div class="field-desc">Paste your Built-in.com job search results page URL here. The scraper will walk through all paginated result pages.</div>
+      <input type="text" id="builtin-url-input" class="url-input"
+             placeholder="https://builtin.com/jobs?...">
+    </div>
+  </div>
+
+  <!-- ── Google Sheets ── -->
+  <div class="settings-section">
+    <div class="settings-section-title">Google Sheets</div>
+    <div class="settings-field">
+      <span class="field-label">Spreadsheet URL</span>
+      <div class="field-desc">
+        Paste the full URL of your Google Sheet (e.g. <code style="color:#71717a">https://docs.google.com/spreadsheets/d/SHEET_ID/edit</code>).
+        The sheet tracks applied and skipped jobs to prevent duplicates across all scrapers.<br><br>
+        <strong style="color:#a1a1aa">How to grant access:</strong> Open your sheet → Share → paste the <code style="color:#71717a">client_email</code> value from your <code style="color:#71717a">google_credentials.json</code> file → set role to <em>Viewer</em> (read-only dedup) or <em>Editor</em> (to allow writing results). The service account email looks like <code style="color:#71717a">name@project.iam.gserviceaccount.com</code>.
+      </div>
+      <input type="text" id="google-sheet-url-input" class="url-input"
+             placeholder="https://docs.google.com/spreadsheets/d/...">
+    </div>
+  </div>
+
+  <div class="save-row">
+    <button class="save-btn" onclick="saveConfig('status-settings')">Save Settings</button>
+    <span id="status-settings" class="save-status"></span>
+  </div>
+</div>
+
+<script>
+  // ── TAB SWITCHING ──────────────────────────────────────────────────────────
+  const TAB_MAP = {
+    'run':         'panel-run',
+    'background':  'panel-background',
+    'resume':      'panel-resume',
+    'settings':    'panel-settings',
+  };
+
+  function showTab(key) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    document.getElementById(TAB_MAP[key]).classList.add('active');
+    document.querySelectorAll('nav button')[Object.keys(TAB_MAP).indexOf(key)].classList.add('active');
+  }
+
+  // ── PROMPT LOADING ─────────────────────────────────────────────────────────
+  async function loadPrompt(key) {
+    try {
+      const r = await fetch(`/prompts/${key}`);
+      const data = await r.json();
+      document.getElementById(`ta-${key}`).value = data.content;
+    } catch (e) {
+      console.error('Failed to load prompt:', key, e);
+    }
+  }
+
+  async function savePrompt(key) {
+    const btn = document.querySelector(`#panel-${key} .save-btn`);
+    const statusEl = document.getElementById(`status-${key}`);
+    const content = document.getElementById(`ta-${key}`).value;
+    btn.disabled = true;
+    statusEl.textContent = 'Saving...';
+    statusEl.className = 'save-status';
+    try {
+      const r = await fetch(`/prompts/${key}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      const data = await r.json();
+      if (data.ok) {
+        statusEl.textContent = 'Saved';
+        statusEl.className = 'save-status saved';
+        setTimeout(() => { statusEl.textContent = ''; statusEl.className = 'save-status'; }, 2500);
+      } else {
+        throw new Error('Server error');
+      }
+    } catch (e) {
+      statusEl.textContent = 'Save failed';
+      statusEl.className = 'save-status error';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ── RESUME ─────────────────────────────────────────────────────────────────
+  async function loadResume() {
+    const text = document.getElementById('resume-text');
+    try {
+      const r = await fetch('/resume');
+      const data = await r.json();
+      text.value = data.filename ? data.text : 'No resume uploaded yet.';
+    } catch (e) {
+      console.error('Failed to load resume:', e);
+    }
+  }
+
+  async function uploadResume() {
+    const input = document.getElementById('resume-file-input');
+    const file = input.files[0];
+    if (!file) return;
+
+    const btn = document.querySelector('#panel-resume .upload-btn');
+    const statusEl = document.getElementById('status-resume');
+    btn.disabled = true;
+    statusEl.textContent = 'Uploading...';
+    statusEl.className = 'save-status';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const r = await fetch('/resume', { method: 'POST', body: formData });
+      const data = await r.json();
+      if (data.ok) {
+        statusEl.textContent = 'Uploaded';
+        statusEl.className = 'save-status saved';
+        setTimeout(() => { statusEl.textContent = ''; statusEl.className = 'save-status'; }, 2500);
+        loadResume();
+      } else {
+        throw new Error('Server error');
+      }
+    } catch (e) {
+      statusEl.textContent = 'Upload failed';
+      statusEl.className = 'save-status error';
+    } finally {
+      btn.disabled = false;
+      input.value = '';
+    }
+  }
+
+  // ── PIPELINE RUNNER ────────────────────────────────────────────────────────
+  let es = null;
+
+  function colorize(line) {
+    if (!line.trim()) return '\n';
+    const l = line.toLowerCase();
+    if (l.includes('error') || l.includes('traceback') || l.includes('exception')) {
+      return `<span class="error">${esc(line)}</span>\n`;
+    }
+    if (l.includes('warning') || l.includes('warn') || l.includes('skip')) {
+      return `<span class="warn">${esc(line)}</span>\n`;
+    }
+    return esc(line) + '\n';
+  }
+
+  function esc(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  async function cancelPipeline() {
+    const cancelBtn = document.getElementById('cancel-btn');
+    cancelBtn.disabled = true;
+    await fetch('/cancel', { method: 'POST' });
+    cancelBtn.disabled = false;
+  }
+
+  async function runPipeline() {
+    if (es) return;
+
+    const btn       = document.getElementById('run-btn');
+    const cancelBtn = document.getElementById('cancel-btn');
+    const status    = document.getElementById('run-status');
+    const log       = document.getElementById('log');
+
+    btn.disabled = true;
+
+    // Flush any unsaved UI state to disk before the scraper process reads config.json.
+    await saveConfig('status-settings');
+
+    const builtinEnabled = document.getElementById('builtin-enabled-cb').checked;
+
+    if (!builtinEnabled) {
+      status.textContent = 'Checking session...';
+      status.className = '';
+      await checkSession();
+
+      if (!sessionValid) {
+        btn.disabled = true;
+        status.textContent = 'Ready';
+        status.className = '';
+        startRelogin();
+        return;
+      }
+    }
+
+    cancelBtn.style.display = '';
+    status.textContent = 'Running...';
+    status.className = 'running';
+    log.innerHTML = '';
+
+    es = new EventSource('/run');
+
+    es.onmessage = (e) => {
+      const line = e.data;
+      if (line === '[DONE]') {
+        es.close(); es = null;
+        btn.disabled = false;
+        cancelBtn.style.display = 'none';
+        return;
+      }
+      log.innerHTML += colorize(line);
+      log.scrollTop = log.scrollHeight;
+
+      if (line.startsWith('── Process exited with code')) {
+        const code = parseInt(line.match(/code (\d+)/)?.[1] ?? '0');
+        if (code === 0) {
+          status.textContent = 'Done';
+          status.className = 'done';
+        } else {
+          status.textContent = `Exited (code ${code})`;
+          status.className = 'error';
+        }
+      }
+    };
+
+    es.onerror = () => {
+      es.close(); es = null;
+      btn.disabled = false;
+      cancelBtn.style.display = 'none';
+      status.textContent = 'Connection lost';
+      status.className = 'error';
+      log.innerHTML += '<span class="error">Connection to server lost.</span>\n';
+    };
+  }
+
+  // ── SESSION CHECK ──────────────────────────────────────────────────────────
+  let sessionValid = false;
+
+  function builtinActive() {
+    return document.getElementById('builtin-enabled-cb').checked;
+  }
+
+  async function checkSession() {
+    const dot      = document.getElementById('session-dot');
+    const label    = document.getElementById('session-label');
+    const relogin  = document.getElementById('relogin-btn');
+    const runBtn   = document.getElementById('run-btn');
+    dot.className  = 'session-dot';
+    label.textContent = 'Checking session...';
+    try {
+      const r = await fetch('/check-session');
+      const data = await r.json();
+      sessionValid = data.valid;
+      if (data.valid) {
+        dot.className = 'session-dot valid';
+        label.textContent = 'LinkedIn session active';
+        relogin.style.display = 'none';
+        runBtn.disabled = false;
+      } else {
+        dot.className = 'session-dot invalid';
+        label.textContent = 'Session expired — re-login required';
+        relogin.style.display = 'inline-block';
+        if (!builtinActive()) runBtn.disabled = true;
+      }
+    } catch (e) {
+      sessionValid = false;
+      dot.className = 'session-dot invalid';
+      label.textContent = 'Could not check session';
+      relogin.style.display = 'inline-block';
+      if (!builtinActive()) runBtn.disabled = true;
+    }
+  }
+
+  let reloginEs = null;
+
+  function startRelogin() {
+    if (reloginEs) return;
+    const reloginBtn = document.getElementById('relogin-btn');
+    const label      = document.getElementById('session-label');
+    const log        = document.getElementById('log');
+    reloginBtn.disabled = true;
+    label.textContent = 'Opening browser — log in to LinkedIn in the window that appeared...';
+    log.innerHTML = '';
+
+    reloginEs = new EventSource('/relogin');
+    reloginEs.onmessage = (e) => {
+      const line = e.data;
+      if (line === '[DONE]') {
+        reloginEs.close(); reloginEs = null;
+        reloginBtn.disabled = false;
+        checkSession();
+        return;
+      }
+      log.innerHTML += esc(line) + '\n';
+      log.scrollTop = log.scrollHeight;
+      label.textContent = line;
+    };
+    reloginEs.onerror = () => {
+      reloginEs.close(); reloginEs = null;
+      reloginBtn.disabled = false;
+      label.textContent = 'Re-login failed — check terminal';
+    };
+  }
+
+  // ── CONFIG ─────────────────────────────────────────────────────────────────
+  async function loadConfig() {
+    try {
+      const r = await fetch('/config');
+      const data = await r.json();
+      document.getElementById('threshold-input').value           = data.score_threshold;
+      document.getElementById('top-applicant-cb').checked        = data.top_applicant;
+      document.getElementById('linkedin-enabled-cb').checked     = data.linkedin_enabled ?? true;
+      document.getElementById('linkedin-search-input').value     = data.linkedin_search_term || 'Product Manager';
+      document.getElementById('builtin-enabled-cb').checked      = data.builtin_enabled;
+      document.getElementById('builtin-url-input').value         = data.builtin_url || '';
+      // Scoring & Filters
+      const tiers = data.seniority_tiers || [];
+      document.getElementById('seniority-tiers-input').value     = tiers.join('\n');
+      const locs  = data.preferred_locations || ['remote', 'miami'];
+      document.getElementById('preferred-locations-input').value = locs.join(', ');
+      document.getElementById('salary-minimum-input').value      = data.salary_minimum || 0;
+      // Google Sheets
+      document.getElementById('google-sheet-url-input').value    = data.google_sheet_url || '';
+      if (data.builtin_enabled) {
+        document.getElementById('run-btn').disabled = false;
+      }
+    } catch (e) {
+      console.error('Failed to load config:', e);
+    }
+  }
+
+  function updateRunBtnState() {
+    if (builtinActive()) {
+      document.getElementById('run-btn').disabled = false;
+    } else {
+      checkSession();
+    }
+  }
+
+  async function saveConfig(statusId) {
+    const statusEl = document.getElementById(statusId || 'status-settings');
+    const rawThreshold       = parseFloat(document.getElementById('threshold-input').value);
+    const threshold          = isNaN(rawThreshold) ? 5.0 : rawThreshold;
+    const topApplicant       = document.getElementById('top-applicant-cb').checked;
+    const linkedinEnabled    = document.getElementById('linkedin-enabled-cb').checked;
+    const linkedinSearchTerm = document.getElementById('linkedin-search-input').value.trim();
+    const builtinEnabled     = document.getElementById('builtin-enabled-cb').checked;
+    const builtinUrl         = document.getElementById('builtin-url-input').value.trim();
+    // Scoring & Filters
+    const seniorityTiers     = document.getElementById('seniority-tiers-input').value
+                                 .split('\n').map(s => s.trim()).filter(Boolean);
+    const preferredLocations = document.getElementById('preferred-locations-input').value
+                                 .split(',').map(s => s.trim()).filter(Boolean);
+    const rawSalary          = parseFloat(document.getElementById('salary-minimum-input').value);
+    const salaryMinimum      = isNaN(rawSalary) ? 0 : rawSalary;
+    // Google Sheets
+    const googleSheetUrl     = document.getElementById('google-sheet-url-input').value.trim();
+
+    statusEl.textContent = 'Saving...';
+    statusEl.className = 'save-status';
+    try {
+      const r = await fetch('/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          score_threshold:      threshold,
+          top_applicant:        topApplicant,
+          linkedin_enabled:     linkedinEnabled,
+          linkedin_search_term: linkedinSearchTerm,
+          builtin_enabled:      builtinEnabled,
+          builtin_url:          builtinUrl,
+          seniority_tiers:      seniorityTiers,
+          preferred_locations:  preferredLocations,
+          salary_minimum:       salaryMinimum,
+          google_sheet_url:     googleSheetUrl,
+        }),
+      });
+      const data = await r.json();
+      if (data.ok) {
+        statusEl.textContent = 'Saved';
+        statusEl.className = 'save-status saved';
+        setTimeout(() => { statusEl.textContent = ''; statusEl.className = 'save-status'; }, 2500);
+      } else {
+        throw new Error('Server error');
+      }
+    } catch (e) {
+      statusEl.textContent = 'Save failed';
+      statusEl.className = 'save-status error';
+    }
+  }
+
+  // ── INIT ───────────────────────────────────────────────────────────────────
+  loadPrompt('background');
+  loadResume();
+  // Load config first so builtin-enabled state is known before checkSession touches runBtn.
+  (async () => { await loadConfig(); await checkSession(); })();
+</script>
+</body>
+</html>

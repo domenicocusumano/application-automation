@@ -1,0 +1,46 @@
+# ── Secrets and credentials ──────────────────────────────────────────────────
+.env
+google_credentials.json
+oauth_credentials.json
+gdrive_token.json
+linkedin_session.json
+
+# ── Personal config (copy config.example.json → config.json and fill in) ────
+config.json
+
+# ── Personal background prompt (copy background_prompt.example.txt → background_prompt.txt) ──
+background_prompt.txt
+
+# ── Personal resume files ────────────────────────────────────────────────────
+*.docx
+*.pdf
+resumes/
+
+# ── Runtime output ───────────────────────────────────────────────────────────
+pipeline_output.json
+
+# ── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── IDEs ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
