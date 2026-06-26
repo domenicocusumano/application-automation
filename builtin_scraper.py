@@ -36,14 +36,14 @@ GOOGLE_CREDS_FILE = Path(__file__).parent / os.getenv("GOOGLE_CREDS_FILE", "goog
 
 # ── TITLE FILTERS ──────────────────────────────────────────────────────────────
 
-EXCLUDED_TITLES = {"program manager", "project manager", "program management"}
+_DEFAULT_EXCLUDED_TITLES = {"program manager", "project manager", "program management"}
 
-EXCLUDED_TITLE_WORDS = {
+_DEFAULT_EXCLUDED_TITLE_WORDS = {
     "engineer", "engineering", "architect", "developer", "scientist",
     "consultant", "devops", "sre",
 }
 
-PM_KEYWORDS = [
+_DEFAULT_TITLE_KEYWORDS = [
     "product manager", "product management", "product lead",
     "product director", "vp product", "head of product",
     "chief product", "product owner",
@@ -55,17 +55,23 @@ _DEFAULT_SENIORITY_TIERS = [
 ]
 
 
-def is_excluded_title(title: str) -> bool:
+def is_excluded_title(title: str, excl_titles=None, excl_words=None) -> bool:
     t = title.lower()
-    if any(ex in t for ex in EXCLUDED_TITLES):
+    _excl_titles = set(excl_titles) if excl_titles is not None else _DEFAULT_EXCLUDED_TITLES
+    _excl_words  = set(excl_words)  if excl_words  is not None else _DEFAULT_EXCLUDED_TITLE_WORDS
+    if any(ex in t for ex in _excl_titles):
         return True
     words = set(re.split(r"[\s,/\-]+", t))
-    return bool(words & EXCLUDED_TITLE_WORDS)
+    return bool(words & _excl_words)
 
 
-def is_pm_title(title: str) -> bool:
+def is_matching_title(title: str, keywords=None) -> bool:
+    """Returns True if the title contains at least one configured role keyword."""
     t = title.lower()
-    return any(kw in t for kw in PM_KEYWORDS)
+    _keywords = keywords if keywords is not None else _DEFAULT_TITLE_KEYWORDS
+    if not _keywords:
+        return True  # no keyword filter set — accept all titles
+    return any(kw in t for kw in _keywords)
 
 
 def is_valid_location(location: str, preferred_locs: Optional[List[str]] = None) -> bool:
@@ -245,8 +251,13 @@ async def scrape_job_detail(page, job_url: str) -> dict:
         await page.goto(job_url, wait_until="domcontentloaded", timeout=DETAIL_TIMEOUT)
         await page.wait_for_timeout(1000)
 
+        # Breadcrumb first-link is the most reliable company source on BuiltIn
         for sel in [
+            "nav[aria-label*='breadcrumb'] a:first-child",
+            "[data-testid='breadcrumb'] a:first-child",
+            "[class*='breadcrumb'] a:first-child",
             "[data-testid='employer-name']", "[data-testid='company-title']",
+            "[data-testid='company-name']",
             ".company-title", ".employer-name",
             "a[href*='/companies/']", "a[href*='/company/']",
             "[class*='CompanyName']", "[class*='company-name']",
@@ -258,6 +269,27 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                     if text and len(text) < 120:
                         result["company"] = text
                         break
+            except Exception:
+                pass
+
+        # JS fallback: breadcrumb first link, then parse "at [Company]" from page title
+        if not result["company"]:
+            try:
+                result["company"] = await page.evaluate("""() => {
+                    const bc = document.querySelector(
+                        '[class*="breadcrumb"], nav[aria-label*="breadcrumb"]'
+                    );
+                    if (bc) {
+                        const link = bc.querySelector('a');
+                        if (link) {
+                            const t = (link.innerText || '').trim();
+                            if (t && t.length < 120) return t;
+                        }
+                    }
+                    // Fallback: parse "Job Title at Company | Built In" from <title>
+                    const m = (document.title || '').match(/\\bat\\s+(.+?)\\s*(?:\\||$)/i);
+                    return m ? m[1].trim() : '';
+                }""") or ""
             except Exception:
                 pass
 
@@ -297,10 +329,31 @@ async def scrape_job_detail(page, job_url: str) -> dict:
             except Exception:
                 pass
 
+        # Expand "Read Full Description" accordion before extracting
+        try:
+            for expand_sel in [
+                "button:has-text('Read Full Description')",
+                "a:has-text('Read Full Description')",
+                "button:has-text('Read full description')",
+                "a:has-text('Read full description')",
+                "[class*='read-full']", "[class*='ReadFull']",
+            ]:
+                el = await page.query_selector(expand_sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    await page.wait_for_timeout(1500)
+                    break
+        except Exception:
+            pass
+
         for sel in [
             "[data-testid='job-description']", ".job-description",
             "#job-description", "[class*='JobDescription']",
-            "[class*='job-description']", "main article", "main", "article",
+            "[class*='job-description']",
+            # BuiltIn "The Role" section containers
+            "[class*='job-details']", "[class*='JobDetails']",
+            "section[class*='job']", "[class*='the-role']", "[class*='TheRole']",
+            "main article", "main", "article",
         ]:
             try:
                 el = await page.query_selector(sel)
@@ -355,6 +408,48 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                         if href and href.startswith("http") and "builtin.com" not in href.lower():
                             result["apply_url"] = href
                             break
+                except Exception:
+                    pass
+
+            # JS fallback: any <a> whose text is exactly "Apply" / "Apply Now"
+            # with an external href (catches sticky footer buttons missed by CSS selectors)
+            if result["apply_url"] == job_url:
+                try:
+                    href = await page.evaluate("""() => {
+                        for (const a of document.querySelectorAll('a[href]')) {
+                            const text = (a.innerText || a.textContent || '').trim().toUpperCase();
+                            const href = a.getAttribute('href') || '';
+                            if ((text === 'APPLY' || text === 'APPLY NOW') &&
+                                href.startsWith('http') &&
+                                !href.toLowerCase().includes('builtin.com')) {
+                                return href;
+                            }
+                        }
+                        return '';
+                    }""") or ""
+                    if href:
+                        result["apply_url"] = href
+                except Exception:
+                    pass
+
+            # Click-and-capture fallback: open Apply button in new tab, capture URL
+            if result["apply_url"] == job_url:
+                try:
+                    for btn_sel in [
+                        "a:has-text('Apply')", "button:has-text('Apply')",
+                        "[class*='apply-btn']", "[class*='ApplyBtn']",
+                    ]:
+                        btn = await page.query_selector(btn_sel)
+                        if btn and await btn.is_visible():
+                            async with page.context.expect_page(timeout=10000) as new_page_info:
+                                await btn.click()
+                            new_tab = await new_page_info.value
+                            await new_tab.wait_for_load_state("domcontentloaded", timeout=10000)
+                            external_url = new_tab.url
+                            await new_tab.close()
+                            if external_url and "builtin.com" not in external_url.lower():
+                                result["apply_url"] = external_url
+                                break
                 except Exception:
                     pass
 
@@ -503,12 +598,16 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
     seen_urls: set         = set()
     seen_fingerprints: set = set()  # (company.lower(), title.lower()) — within-run dedup
 
-    preferred_locs = config.get("preferred_locations", ["remote", "miami"])
-    seniority_tiers = config.get("seniority_tiers", _DEFAULT_SENIORITY_TIERS)
+    preferred_locs  = config.get("preferred_locations",   ["remote", "miami"])
+    seniority_tiers = config.get("seniority_tiers",       _DEFAULT_SENIORITY_TIERS)
+    title_keywords  = [k.lower() for k in config.get("title_keywords",       _DEFAULT_TITLE_KEYWORDS)]
+    excl_titles     = [k.lower() for k in config.get("excluded_titles",      list(_DEFAULT_EXCLUDED_TITLES))]
+    excl_words      = [k.lower() for k in config.get("excluded_title_words", list(_DEFAULT_EXCLUDED_TITLE_WORDS))]
 
     log(f"[Pipeline Settings — applied to all scrapers]")
     log(f"  Preferred locations : {preferred_locs}")
     log(f"  Seniority tiers     : {seniority_tiers}")
+    log(f"  Title keywords      : {title_keywords}")
     log(f"  Scoring             : programmatic (no Claude)")
     log(f"  Already-applied     : checked against Applications + Skips tabs\n")
     log(f"[Built-in] Starting — target: {MAX_CANDIDATES} candidates")
@@ -565,11 +664,11 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
                     dup += 1
                     continue
 
-                if is_excluded_title(title):
+                if is_excluded_title(title, excl_titles, excl_words):
                     excluded += 1
                     continue
 
-                if not is_pm_title(title):
+                if not is_matching_title(title, title_keywords):
                     not_pm += 1
                     continue
 

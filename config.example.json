@@ -5,6 +5,31 @@
   "linkedin_search_term": "Product Manager",
   "builtin_enabled": false,
   "builtin_url": "https://builtin.com/jobs/remote?search=product%20manager&city=&state=&country=USA&allLocations=true",
+  "title_keywords": [
+    "product manager",
+    "product management",
+    "product lead",
+    "product director",
+    "vp product",
+    "head of product",
+    "chief product",
+    "product owner"
+  ],
+  "excluded_titles": [
+    "program manager",
+    "project manager",
+    "program management"
+  ],
+  "excluded_title_words": [
+    "engineer",
+    "engineering",
+    "architect",
+    "developer",
+    "scientist",
+    "consultant",
+    "devops",
+    "sre"
+  ],
   "seniority_tiers": [
     "vp",
     "vice president",

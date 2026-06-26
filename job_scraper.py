@@ -55,23 +55,30 @@ SESSION_FILE = SCRIPT_DIR / "linkedin_session.json"
 SEARCH_KEYWORDS = "Product Manager"
 SEARCH_LOCATION = "United States"
 
-EXCLUDED_TITLES = [
+_DEFAULT_EXCLUDED_TITLES = [
     "program manager", "project manager", "program management",
 ]
 
-# Generic non-PM role words — matched as whole words so "engineer" also catches
-# "forward deployment engineer", "ai engineer", etc. without enumerating every
-# possible compound phrase (which is an unwinnable game against new title variants).
-EXCLUDED_TITLE_WORDS = [
+_DEFAULT_EXCLUDED_TITLE_WORDS = [
     "engineer", "engineering", "architect", "developer", "scientist",
     "consultant", "devops", "sre",
 ]
 
-# Title must actually be a PM role — seniority alone isn't enough (e.g. "VP, Advanced
-# Concepts and Training" has seniority but isn't a PM title)
-REQUIRED_PM_TERMS = ["product manager", "product management", "product owner",
-                     "head of product", "vp of product", "vp, product",
-                     "director of product", "director, product"]
+_DEFAULT_TITLE_KEYWORDS = [
+    "product manager", "product management", "product owner",
+    "head of product", "vp of product", "vp, product",
+    "director of product", "director, product",
+    "product lead", "product director", "chief product",
+]
+
+
+def _load_title_filters(cfg: dict) -> tuple:
+    """Returns (title_keywords, excluded_titles, excluded_title_words) from config."""
+    return (
+        [k.lower() for k in cfg.get("title_keywords",        _DEFAULT_TITLE_KEYWORDS)],
+        [k.lower() for k in cfg.get("excluded_titles",       _DEFAULT_EXCLUDED_TITLES)],
+        [k.lower() for k in cfg.get("excluded_title_words",  _DEFAULT_EXCLUDED_TITLE_WORDS)],
+    )
 
 # ── GOOGLE SHEETS ──────────────────────────────────────────────────────────────
 
@@ -639,24 +646,23 @@ def collect_cards_on_page(page, min_cards=200, slow=False):
     return best_cards
 
 
-def extract_jobs_from_page(page, seen_ids, min_cards=200, slow=False):
+def extract_jobs_from_page(page, seen_ids, min_cards=200, slow=False, title_filters=None):
     """Collects cards on the current page, extracts job data, and reports filter stats."""
     jobs = []
     cards = collect_cards_on_page(page, min_cards=min_cards, slow=slow)
 
-    stats = {"no_data": 0, "excluded": 0, "not_pm": 0, "dup": 0, "kept": 0}
+    stats = {"no_data": 0, "excluded": 0, "not_matched": 0, "dup": 0, "kept": 0}
 
     for card in cards:
         try:
-            result = extract_job_from_card(card, return_reason=True)
+            result = extract_job_from_card(card, return_reason=True, title_filters=title_filters)
             if isinstance(result, str):
-                # Got a rejection reason
                 if result == "no_data":
                     stats["no_data"] += 1
                 elif result == "excluded":
                     stats["excluded"] += 1
-                elif result == "not_pm":
-                    stats["not_pm"] += 1
+                elif result == "not_matched":
+                    stats["not_matched"] += 1
                 continue
 
             job = result
@@ -675,7 +681,7 @@ def extract_jobs_from_page(page, seen_ids, min_cards=200, slow=False):
             continue
 
     print(f"      Kept {stats['kept']} | No data: {stats['no_data']} | "
-          f"Excluded title: {stats['excluded']} | Not PM: {stats['not_pm']} | Dup: {stats['dup']}")
+          f"Excluded title: {stats['excluded']} | Not matched: {stats['not_matched']} | Dup: {stats['dup']}")
 
     return jobs
 
@@ -703,6 +709,7 @@ def scrape_linkedin(keywords, location, applied_pairs, applied_urls):
     config         = _load_config()
     top_applicant  = config.get("top_applicant", False)
     preferred_locs = config.get("preferred_locations", ["remote", "miami"])
+    title_filters  = _load_title_filters(config)
 
     candidates = []  # jobs that passed ALL filters
     seen_ids = set()
@@ -806,7 +813,7 @@ def scrape_linkedin(keywords, location, applied_pairs, applied_urls):
                 for pg in range(1, max_pages + 1):
                     print(f"   --- {label} page {pg} ---")
                     render_all_cards(page)
-                    jobs = extract_jobs_from_page(page, seen_ids, min_cards=1)
+                    jobs = extract_jobs_from_page(page, seen_ids, min_cards=1, title_filters=title_filters)
                     filter_and_keep(jobs)
                     print(f"      {len(jobs)} raw | Candidates so far: {len(candidates)}")
 
@@ -940,10 +947,18 @@ def fetch_apply_urls(jobs):
     return jobs
 
 
-def extract_job_from_card(card, return_reason=False):
+def extract_job_from_card(card, return_reason=False, title_filters=None):
     """Extracts title, company, location, url from a LinkedIn job card.
     Uses CSS selectors first, then a JS fallback for unknown card layouts.
-    If return_reason=True, returns a string reason instead of None on rejection."""
+    If return_reason=True, returns a string reason instead of None on rejection.
+    title_filters: tuple of (title_keywords, excluded_titles, excluded_title_words) from config."""
+    if title_filters:
+        title_keywords, excl_titles, excl_words = title_filters
+    else:
+        title_keywords = _DEFAULT_TITLE_KEYWORDS
+        excl_titles    = _DEFAULT_EXCLUDED_TITLES
+        excl_words     = _DEFAULT_EXCLUDED_TITLE_WORDS
+
     def text(selector):
         el = card.query_selector(selector)
         return el.inner_text().strip() if el else ""
@@ -1029,14 +1044,14 @@ def extract_job_from_card(card, return_reason=False):
 
     # ── Title filters ──
     title_lower = title.lower()
-    if any(exc in title_lower for exc in EXCLUDED_TITLES):
+    if any(exc in title_lower for exc in excl_titles):
         return reject("excluded")
 
-    if any(re.search(r'\b' + re.escape(word) + r'\b', title_lower) for word in EXCLUDED_TITLE_WORDS):
+    if any(re.search(r'\b' + re.escape(word) + r'\b', title_lower) for word in excl_words):
         return reject("excluded")
 
-    if not any(term in title_lower for term in REQUIRED_PM_TERMS):
-        return reject("not_pm")
+    if title_keywords and not any(term in title_lower for term in title_keywords):
+        return reject("not_matched")
 
     return {
         "title":    title,

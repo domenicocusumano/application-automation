@@ -1,6 +1,10 @@
 # Job Application Automation
 
-A self-hosted pipeline that scrapes PM roles from LinkedIn and Built-in.com, scores each one against your background with Claude, builds a tailored `.docx` resume for every strong match, uploads it to Google Drive, and logs everything to a Google Sheet — all controlled from a local web UI.
+A self-hosted pipeline that scrapes job listings from LinkedIn and Built-in.com, scores each one against your background with Claude, and builds a tailored `.docx` resume for every strong match — uploading it to Google Drive and logging everything to a Google Sheet. All settings are controlled from a local web UI.
+
+The pipeline is **role-agnostic**. It ships with defaults tuned for Product Manager searches, but the search terms, title filters, seniority tiers, and scoring prompt are all configurable — so it works for any role type: engineering, design, data science, marketing, or anything else. Changing your target role is a matter of updating a few fields in the UI.
+
+> **Note on the form filler:** `application_filler.py` is included but is **experimental and not fully reliable** — application form layouts vary too widely across ATS platforms for fully automated filling to work consistently. The core value of this project is in candidate discovery and resume generation. The form filler is provided as a starting point for anyone who wants to build on it, and should be used at your own risk.
 
 ---
 
@@ -12,9 +16,10 @@ Web UI (app.py + ui.html)
         └── Launches one of two scrapers:
 
 job_scraper.py  (LinkedIn)          builtin_scraper.py  (Built-in.com)
-  └── Filters candidates by title,      └── Same filters + fetches actual
-      location, seniority, already-         apply URL from detail page
-      applied sheet check                   └── Calls resume_pipeline below
+  └── Filters candidates by:            └── Same filters + fetches the actual
+      · title keywords (configurable)       external apply URL from detail page
+      · location                            └── Calls resume_pipeline directly
+      · already-applied sheet check
         └── Programmatic seniority
             scoring (no Claude)
               └── (optional) feeds into ↓
@@ -27,10 +32,10 @@ resume_pipeline.py
                           └── Uploads to Google Drive
                                 └── Logs to Google Sheet (Applications / Skips tab)
 
-application_filler.py
+application_filler.py  ⚠ experimental
   └── Opens each application URL in a real browser
         └── Claude reads the page HTML and maps every form field
-              └── Playwright fills and submits
+              └── Playwright fills fields — use at your own risk
 ```
 
 ---
@@ -170,15 +175,32 @@ All settings are managed through the web UI and persisted to `config.json`. You 
 | **Score threshold** | Minimum Claude score (0–10) to trigger a resume build |
 | **Top Applicant feed** | Also scrape LinkedIn's "Top Applicant" feed (requires LinkedIn Premium) |
 | **LinkedIn enabled** | Run the LinkedIn scraper |
-| **LinkedIn search term** | Keyword used for the Phase 2 LinkedIn search |
+| **LinkedIn search term** | Keyword used for the Phase 2 LinkedIn keyword search (e.g. `Product Manager`, `Software Engineer`, `Data Scientist`) |
 | **Built-in enabled** | Run the Built-in.com scraper |
-| **Built-in URL** | The Built-in.com search URL to paginate through |
-| **Seniority tiers** | Ordered list of title keywords — earlier = higher score. Used for programmatic candidate ranking (no Claude). |
-| **Preferred locations** | Comma-separated list (e.g. `remote, miami`). Jobs not matching are filtered out of candidates AND hard-disqualified by Claude if the JD requires proximity to another city. |
-| **Salary minimum** | If the JD states a max salary below this number, the job goes to Skips. Set to 0 to disable. |
+| **Built-in URL** | The Built-in.com search results URL to paginate through — build it by searching on the site |
+| **Role keywords (must match)** | A job title must contain at least one of these phrases to be considered. Change these to match your target role. One phrase per line. |
+| **Excluded titles** | Titles containing any of these exact phrases are rejected, even if they match a role keyword (e.g. block "program manager" while searching for "product manager"). One phrase per line. |
+| **Excluded title words** | Individual words that, if found as a whole word in a title, cause rejection. Useful for blocking adjacent professions. Comma-separated. |
+| **Seniority tiers** | Ordered list of title keywords for programmatic scoring — earlier = higher score. Not a hard filter; unmatched titles score 3.0/10. |
+| **Preferred locations** | Comma-separated list (e.g. `remote, new york`). Jobs not matching are filtered out, and Claude hard-disqualifies roles requiring office presence outside these locations. |
+| **Salary minimum** | If the JD states a max salary below this number, the job is skipped. Set to 0 to disable. |
 | **Google Sheet URL** | Paste your full sheet URL — the ID is extracted automatically |
 
 Settings take effect immediately on the next run. No restart needed.
+
+### Adapting for a different role type
+
+The defaults are tuned for PM searches. To target a different role, update these five settings in the UI:
+
+| Setting | PM default | Example: Software Engineer |
+|---|---|---|
+| LinkedIn search term | `Product Manager` | `Software Engineer` |
+| Role keywords | `product manager`, `product owner`, … | `software engineer`, `software developer`, `swe` |
+| Excluded titles | `program manager`, `project manager` | `manager`, `director` *(if you want IC roles only)* |
+| Excluded title words | `engineer`, `developer`, … | *(clear this — you want engineers)* |
+| Built-in URL | PM search URL | New URL built from builtin.com for your role |
+
+Also update your `background_prompt.txt` to reflect your actual background, experience, and scoring calibration for the new role type.
 
 ---
 
@@ -207,9 +229,11 @@ Scrapes LinkedIn using your saved browser session. Three phases:
 
 - **Phase 0** *(optional)*: LinkedIn's "Top Applicant" collection (requires Premium)
 - **Phase 1**: Your personalized "Recommended" jobs feed — exhausted fully before Phase 2
-- **Phase 2**: Keyword search (`"Product Manager"` across United States by default) — paginated until the candidate target is reached
+- **Phase 2**: Keyword search using your configured **LinkedIn search term** — paginated until the candidate target is reached
 
-For each job that passes title and location filters, it navigates to the LinkedIn job page, extracts the **actual external apply URL** (the company career site link, not just the LinkedIn URL), then runs a second dedup pass against the sheet with those real URLs.
+The search term (set in Settings → LinkedIn → Search term) drives Phase 2. Set it to whatever role you're targeting: `"Software Engineer"`, `"Data Scientist"`, `"UX Designer"`, etc. Phases 0 and 1 use LinkedIn's personalization, so they surface roles matching your profile regardless of the search term.
+
+For each job that passes all title and location filters, it navigates to the LinkedIn job page and extracts the **actual external apply URL** (the company career site link, not just the LinkedIn URL), then runs a second dedup pass against the sheet.
 
 After collecting candidates, they are **ranked programmatically** by seniority tier score — no Claude API call at this stage.
 
@@ -227,7 +251,7 @@ python3 job_scraper.py --resume  # scrape, rank, and immediately build resumes
 
 ### Built-in scraper — `builtin_scraper.py`
 
-Scrapes Built-in.com via a headless browser (no login required). Workflow per job:
+Scrapes Built-in.com via a headless browser (no login required). The search is driven entirely by the **Built-in URL** you configure — build the URL by doing a search on builtin.com with your filters (role, location, remote, etc.) and paste the results page URL into Settings. Workflow per job:
 
 1. Extracts title and location from the list page card (JS-evaluated to get the work model — Remote/Hybrid/In-office)
 2. Filters by title (must be a PM role, not program/project/engineering) and location
@@ -298,9 +322,11 @@ Your full resume context, candidate facts, style rules, and scoring calibration 
 
 ---
 
-### Form filler — `application_filler.py`
+### Form filler — `application_filler.py` ⚠ experimental
 
-Automatically fills and submits job application forms:
+> **This component is not fully reliable.** Application form layouts vary widely across ATS platforms (Greenhouse, Lever, Workday, iCIMS, custom systems) and change frequently. Automated field detection works well for simple forms but fails unpredictably on multi-step, iframe-based, or heavily dynamic forms. Use it as a starting point or build on it — but always review before submitting and don't rely on it for important applications.
+
+Attempts to automatically fill and submit job application forms:
 
 1. Opens a browser (real Chrome if installed for genuine fingerprint, Playwright Chromium as fallback) with stealth patches applied to suppress bot-detection signals
 2. Navigates to the application URL; if on a job overview page, finds the actual form via link scan or Claude fallback
