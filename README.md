@@ -286,7 +286,7 @@ Processes a list of job candidates end-to-end:
    - If the JD requires living near an office city not in your preferred locations → Skips tab
    - Occasional travel (≤ once/month) is not disqualifying
 
-4. **Builds a tailored `.docx` resume** for any job scoring ≥ the score threshold:
+4. **Builds a tailored `.docx` resume** for any job scoring ≥ the score threshold (requires a base resume in `base_resume/`):
    - Experience bullets reordered to lead with the most relevant stories for this specific role
    - Competency categories reordered to match the JD's priorities
    - Tailored summary written for the role
@@ -392,9 +392,10 @@ application-automation/
 ├── background_prompt.txt       # Your resume context and scoring rules for Claude
 ├── config.json                 # All pipeline settings (managed via UI)
 │
-├── resumes/                    # Generated .docx resumes (local copies)
+├── base_resume/                # Drop your base resume here (gitignored — never committed)
+│   └── Your_Resume.docx        #   or upload it via the web UI
 │
-├── Firstname_Lastname_General_Resume.docx   # Base resume uploaded via UI
+├── resumes/                    # Generated tailored .docx resumes (gitignored)
 │
 ├── .env                        # API keys (git-ignored)
 ├── google_credentials.json     # Google service account key (git-ignored)

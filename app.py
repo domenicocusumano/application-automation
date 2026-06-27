@@ -20,25 +20,19 @@ SCRIPT_DIR = Path(__file__).parent
 PROMPT_FILES = {
     "background": "background_prompt.txt",
 }
-def _resume_stem():
-    try:
-        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        prefix = cfg.get("resume_prefix", "My_Resume").strip()
-        return f"{prefix}_General_Resume" if prefix else "My_Resume_General_Resume"
-    except Exception:
-        return "My_Resume_General_Resume"
-
-RESUME_STEM = _resume_stem()
 RESUME_EXTENSIONS = (".pdf", ".docx")
+BASE_RESUME_DIR = SCRIPT_DIR / "base_resume"
 CONFIG_FILE = SCRIPT_DIR / "config.json"
 _run_lock = asyncio.Lock()
 
 
 def find_resume_file():
+    """Returns the first .pdf or .docx found in base_resume/, or None."""
+    BASE_RESUME_DIR.mkdir(exist_ok=True)
     for ext in RESUME_EXTENSIONS:
-        path = SCRIPT_DIR / f"{RESUME_STEM}{ext}"
-        if path.exists():
-            return path
+        matches = list(BASE_RESUME_DIR.glob(f"*{ext}"))
+        if matches:
+            return matches[0]
     return None
 
 
@@ -94,11 +88,12 @@ async def upload_resume(file: UploadFile = File(...)):
     ext = Path(file.filename).suffix.lower()
     if ext not in RESUME_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Resume must be a .pdf or .docx file")
+    BASE_RESUME_DIR.mkdir(exist_ok=True)
     existing = find_resume_file()
     if existing is not None:
         existing.unlink()
     content = await file.read()
-    (SCRIPT_DIR / f"{RESUME_STEM}{ext}").write_bytes(content)
+    (BASE_RESUME_DIR / file.filename).write_bytes(content)
     return JSONResponse({"ok": True})
 
 

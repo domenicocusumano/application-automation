@@ -12,8 +12,10 @@ config.json
 background_prompt.txt
 
 # ── Personal resume files ────────────────────────────────────────────────────
-*.docx
-*.pdf
+# base_resume/ holds your source resume — the folder is tracked, the file is not
+base_resume/*.docx
+base_resume/*.pdf
+# resumes/ holds pipeline-generated tailored resumes — never commit these
 resumes/
 
 # ── Runtime output ───────────────────────────────────────────────────────────

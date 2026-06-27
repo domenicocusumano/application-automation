@@ -441,17 +441,18 @@ def build_resume_content(client, job, job_description, score_data):
     score       = score_data.get("score", 0)
     assessment  = score_data.get("assessment", "")
 
-    resume_prefix = _load_pipeline_config().get("resume_prefix", "My_Resume")
     resume_path = None
+    base_resume_dir = os.path.join(SCRIPT_DIR, "base_resume")
     for ext in (".pdf", ".docx"):
-        candidate = os.path.join(SCRIPT_DIR, f"{resume_prefix}_General_Resume{ext}")
-        if os.path.exists(candidate):
-            resume_path = candidate
+        import glob as _glob
+        matches = _glob.glob(os.path.join(base_resume_dir, f"*{ext}"))
+        if matches:
+            resume_path = matches[0]
             break
     if resume_path is None:
         raise FileNotFoundError(
-            f"No {resume_prefix}_General_Resume.pdf or .docx found. "
-            "Upload your base resume via the web UI or place it in the project root."
+            "No base resume found in base_resume/. "
+            "Upload your resume (.pdf or .docx) via the web UI."
         )
 
     if resume_path.endswith(".pdf"):
