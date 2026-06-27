@@ -52,24 +52,14 @@ SESSION_FILE = SCRIPT_DIR / "linkedin_session.json"
 # ── SEARCH CONFIG ─────────────────────────────────────────────────────────────
 # Single broad search — LinkedIn personalizes results when you're logged in.
 # Claude handles all the industry/seniority prioritization.
-SEARCH_KEYWORDS = "Product Manager"
+SEARCH_KEYWORDS = ""
 SEARCH_LOCATION = "United States"
 
-_DEFAULT_EXCLUDED_TITLES = [
-    "program manager", "project manager", "program management",
-]
+_DEFAULT_EXCLUDED_TITLES: list = []
 
-_DEFAULT_EXCLUDED_TITLE_WORDS = [
-    "engineer", "engineering", "architect", "developer", "scientist",
-    "consultant", "devops", "sre",
-]
+_DEFAULT_EXCLUDED_TITLE_WORDS: list = []
 
-_DEFAULT_TITLE_KEYWORDS = [
-    "product manager", "product management", "product owner",
-    "head of product", "vp of product", "vp, product",
-    "director of product", "director, product",
-    "product lead", "product director", "chief product",
-]
+_DEFAULT_TITLE_KEYWORDS: list = []
 
 
 def _load_title_filters(cfg: dict) -> tuple:
@@ -1070,7 +1060,7 @@ def extract_job_id(url):
 # ── PROGRAMMATIC RANKING ───────────────────────────────────────────────────────
 
 _DEFAULT_SENIORITY_TIERS = [
-    "vp", "vice president", "cpo", "head of", "director",
+    "vp", "vice president", "head of", "director",
     "principal", "staff", "lead", "senior", "group",
 ]
 

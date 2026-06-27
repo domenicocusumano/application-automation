@@ -110,18 +110,12 @@ def _read_config():
 
 
 _DEFAULT_SENIORITY_TIERS = [
-    "vp", "vice president", "cpo", "head of", "director",
+    "vp", "vice president", "head of", "director",
     "principal", "staff", "lead", "senior", "group",
 ]
-_DEFAULT_TITLE_KEYWORDS = [
-    "product manager", "product management", "product lead", "product director",
-    "vp product", "head of product", "chief product", "product owner",
-]
-_DEFAULT_EXCLUDED_TITLES = ["program manager", "project manager", "program management"]
-_DEFAULT_EXCLUDED_TITLE_WORDS = [
-    "engineer", "engineering", "architect", "developer", "scientist",
-    "consultant", "devops", "sre",
-]
+_DEFAULT_TITLE_KEYWORDS: list = []
+_DEFAULT_EXCLUDED_TITLES: list = []
+_DEFAULT_EXCLUDED_TITLE_WORDS: list = []
 
 
 @app.get("/config")
@@ -131,7 +125,7 @@ async def get_config():
         "score_threshold":        config.get("score_threshold", 5.0),
         "top_applicant":          config.get("top_applicant", False),
         "linkedin_enabled":       config.get("linkedin_enabled", True),
-        "linkedin_search_term":   config.get("linkedin_search_term", "Product Manager"),
+        "linkedin_search_term":   config.get("linkedin_search_term", ""),
         "builtin_enabled":        config.get("builtin_enabled", False),
         "builtin_url":            config.get("builtin_url", ""),
         "title_keywords":         config.get("title_keywords",        _DEFAULT_TITLE_KEYWORDS),
@@ -148,7 +142,7 @@ class ConfigBody(BaseModel):
     score_threshold: float
     top_applicant: bool = False
     linkedin_enabled: bool = True
-    linkedin_search_term: str = "Product Manager"
+    linkedin_search_term: str = ""
     builtin_enabled: bool = False
     builtin_url: str = ""
     title_keywords: List[str] = []
