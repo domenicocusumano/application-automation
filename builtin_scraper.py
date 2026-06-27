@@ -36,21 +36,14 @@ GOOGLE_CREDS_FILE = Path(__file__).parent / os.getenv("GOOGLE_CREDS_FILE", "goog
 
 # ── TITLE FILTERS ──────────────────────────────────────────────────────────────
 
-_DEFAULT_EXCLUDED_TITLES = {"program manager", "project manager", "program management"}
+_DEFAULT_EXCLUDED_TITLES: set = set()
 
-_DEFAULT_EXCLUDED_TITLE_WORDS = {
-    "engineer", "engineering", "architect", "developer", "scientist",
-    "consultant", "devops", "sre",
-}
+_DEFAULT_EXCLUDED_TITLE_WORDS: set = set()
 
-_DEFAULT_TITLE_KEYWORDS = [
-    "product manager", "product management", "product lead",
-    "product director", "vp product", "head of product",
-    "chief product", "product owner",
-]
+_DEFAULT_TITLE_KEYWORDS: list = []
 
 _DEFAULT_SENIORITY_TIERS = [
-    "vp", "vice president", "cpo", "head of", "director",
+    "vp", "vice president", "head of", "director",
     "principal", "staff", "lead", "senior", "group",
 ]
 

@@ -2,34 +2,12 @@
   "score_threshold": 6.5,
   "top_applicant": false,
   "linkedin_enabled": true,
-  "linkedin_search_term": "Product Manager",
+  "linkedin_search_term": "Your Target Role",
   "builtin_enabled": false,
-  "builtin_url": "https://builtin.com/jobs/remote?search=product%20manager&city=&state=&country=USA&allLocations=true",
-  "title_keywords": [
-    "product manager",
-    "product management",
-    "product lead",
-    "product director",
-    "vp product",
-    "head of product",
-    "chief product",
-    "product owner"
-  ],
-  "excluded_titles": [
-    "program manager",
-    "project manager",
-    "program management"
-  ],
-  "excluded_title_words": [
-    "engineer",
-    "engineering",
-    "architect",
-    "developer",
-    "scientist",
-    "consultant",
-    "devops",
-    "sre"
-  ],
+  "builtin_url": "https://builtin.com/jobs/remote?search=your+role&country=USA&allLocations=true",
+  "title_keywords": [],
+  "excluded_titles": [],
+  "excluded_title_words": [],
   "seniority_tiers": [
     "vp",
     "vice president",
@@ -67,7 +45,7 @@
     "work_auth": "Yes — US Citizen, no sponsorship required",
     "requires_visa": "No",
     "years_exp": "10",
-    "current_title": "Senior Product Manager",
+    "current_title": "Your Current Title",
     "current_company": "Your Company",
     "salary_min": "150000",
     "salary_mid": "175000",

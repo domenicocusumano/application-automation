@@ -2,7 +2,7 @@
 
 A self-hosted pipeline that scrapes job listings from LinkedIn and Built-in.com, scores each one against your background with Claude, and builds a tailored `.docx` resume for every strong match — uploading it to Google Drive and logging everything to a Google Sheet. All settings are controlled from a local web UI.
 
-The pipeline is **role-agnostic**. It ships with defaults tuned for Product Manager searches, but the search terms, title filters, seniority tiers, and scoring prompt are all configurable — so it works for any role type: engineering, design, data science, marketing, or anything else. Changing your target role is a matter of updating a few fields in the UI.
+The pipeline is **fully role-agnostic** — there are no baked-in defaults for any specific role type. All search terms, title filters, seniority tiers, and the scoring prompt are configured through the UI. It works equally well for engineering, design, data science, marketing, operations, or any other role.
 
 > **Note on the form filler:** `application_filler.py` is included but is **experimental and not fully reliable** — application form layouts vary too widely across ATS platforms for fully automated filling to work consistently. The core value of this project is in candidate discovery and resume generation. The form filler is provided as a starting point for anyone who wants to build on it, and should be used at your own risk.
 
@@ -175,7 +175,7 @@ All settings are managed through the web UI and persisted to `config.json`. You 
 | **Score threshold** | Minimum Claude score (0–10) to trigger a resume build |
 | **Top Applicant feed** | Also scrape LinkedIn's "Top Applicant" feed (requires LinkedIn Premium) |
 | **LinkedIn enabled** | Run the LinkedIn scraper |
-| **LinkedIn search term** | Keyword used for the Phase 2 LinkedIn keyword search (e.g. `Product Manager`, `Software Engineer`, `Data Scientist`) |
+| **LinkedIn search term** | Keyword used for the Phase 2 LinkedIn keyword search (e.g. `Software Engineer`, `Data Scientist`, `UX Designer`) |
 | **Built-in enabled** | Run the Built-in.com scraper |
 | **Built-in URL** | The Built-in.com search results URL to paginate through — build it by searching on the site |
 | **Role keywords (must match)** | A job title must contain at least one of these phrases to be considered. Change these to match your target role. One phrase per line. |
@@ -188,19 +188,19 @@ All settings are managed through the web UI and persisted to `config.json`. You 
 
 Settings take effect immediately on the next run. No restart needed.
 
-### Adapting for a different role type
+### Targeting your role
 
-The defaults are tuned for PM searches. To target a different role, update these five settings in the UI:
+Update these five settings in the UI for your target role:
 
-| Setting | PM default | Example: Software Engineer |
-|---|---|---|
-| LinkedIn search term | `Product Manager` | `Software Engineer` |
-| Role keywords | `product manager`, `product owner`, … | `software engineer`, `software developer`, `swe` |
-| Excluded titles | `program manager`, `project manager` | `manager`, `director` *(if you want IC roles only)* |
-| Excluded title words | `engineer`, `developer`, … | *(clear this — you want engineers)* |
-| Built-in URL | PM search URL | New URL built from builtin.com for your role |
+| Setting | What to enter |
+|---|---|
+| LinkedIn search term | The job title you want LinkedIn to search — e.g. `Software Engineer`, `Data Scientist`, `UX Designer` |
+| Role keywords | Phrases a matching title must contain. One per line. Leave blank to accept all titles. |
+| Excluded titles | Exact phrases that disqualify a title even if it contains a role keyword. One per line. |
+| Excluded title words | Individual words that reject a title when found as a whole word. Leave blank to skip word-level filtering. |
+| Built-in URL | Build by searching builtin.com with your filters (role, location, remote, etc.) and paste the results URL |
 
-Also update your `background_prompt.txt` to reflect your actual background, experience, and scoring calibration for the new role type.
+Also edit `background_prompt.txt` to reflect your actual experience and scoring criteria — this is the primary input Claude uses when scoring and writing resumes.
 
 ---
 
@@ -231,7 +231,7 @@ Scrapes LinkedIn using your saved browser session. Three phases:
 - **Phase 1**: Your personalized "Recommended" jobs feed — exhausted fully before Phase 2
 - **Phase 2**: Keyword search using your configured **LinkedIn search term** — paginated until the candidate target is reached
 
-The search term (set in Settings → LinkedIn → Search term) drives Phase 2. Set it to whatever role you're targeting: `"Software Engineer"`, `"Data Scientist"`, `"UX Designer"`, etc. Phases 0 and 1 use LinkedIn's personalization, so they surface roles matching your profile regardless of the search term.
+The search term (set in Settings → LinkedIn → Search term) drives Phase 2. Phases 0 and 1 use LinkedIn's personalization, so they surface roles matching your profile regardless of the search term.
 
 For each job that passes all title and location filters, it navigates to the LinkedIn job page and extracts the **actual external apply URL** (the company career site link, not just the LinkedIn URL), then runs a second dedup pass against the sheet.
 
@@ -254,7 +254,7 @@ python3 job_scraper.py --resume  # scrape, rank, and immediately build resumes
 Scrapes Built-in.com via a headless browser (no login required). The search is driven entirely by the **Built-in URL** you configure — build the URL by doing a search on builtin.com with your filters (role, location, remote, etc.) and paste the results page URL into Settings. Workflow per job:
 
 1. Extracts title and location from the list page card (JS-evaluated to get the work model — Remote/Hybrid/In-office)
-2. Filters by title (must be a PM role, not program/project/engineering) and location
+2. Filters by title (using your configured role keywords and exclusions) and location
 3. **Pre-checks against the Google Sheet** by Built-in URL and numeric job ID — skips the detail page entirely if already applied
 4. Visits the detail page to extract: company, full job description, and the **actual external apply URL** (the button that takes you to the company's career site)
 5. Checks within-run fingerprint (company + title) to catch the same job appearing on multiple pages with different URLs
@@ -277,7 +277,7 @@ URLs are normalized before any comparison: query parameters, URL fragments, trai
 
 Processes a list of job candidates end-to-end:
 
-1. **Fetches the full job description** in a headless browser. For Built-in jobs the description is already pre-scraped and reused directly (no second fetch). Falls back to the LinkedIn URL if the primary URL fails.
+1. **Fetches the full job description** in a headless browser. Primary source is always the apply URL. Falls back to pre-scraped listing text, then to the listing page URL if the primary fetch fails.
 
 2. **Scores the job with Claude** (0–10 scale). The scoring prompt reads your background from `background_prompt.txt` and considers: role-type alignment, seniority match, industry fit, and location.
 
@@ -286,7 +286,7 @@ Processes a list of job candidates end-to-end:
    - If the JD requires living near an office city not in your preferred locations → Skips tab
    - Occasional travel (≤ once/month) is not disqualifying
 
-4. **Builds a tailored `.docx` resume** for any job scoring ≥ the score threshold:
+4. **Builds a tailored `.docx` resume** for any job scoring ≥ the score threshold (requires a base resume in `base_resume/`):
    - Experience bullets reordered to lead with the most relevant stories for this specific role
    - Competency categories reordered to match the JD's priorities
    - Tailored summary written for the role
@@ -305,10 +305,10 @@ Where `jobs.json` is an array:
 ```json
 [
   {
-    "title": "Senior Product Manager",
+    "title": "Senior Software Engineer",
     "company": "Acme Corp",
     "location": "Remote",
-    "url": "https://acme.com/careers/spm-role",
+    "url": "https://acme.com/careers/sse-role",
     "linkedin_url": "https://www.linkedin.com/jobs/view/1234567890"
   }
 ]
@@ -392,9 +392,10 @@ application-automation/
 ├── background_prompt.txt       # Your resume context and scoring rules for Claude
 ├── config.json                 # All pipeline settings (managed via UI)
 │
-├── resumes/                    # Generated .docx resumes (local copies)
+├── base_resume/                # Drop your base resume here (gitignored — never committed)
+│   └── Your_Resume.docx        #   or upload it via the web UI
 │
-├── Dom_Cusumano_General_Resume.docx   # Base resume uploaded via UI
+├── resumes/                    # Generated tailored .docx resumes (gitignored)
 │
 ├── .env                        # API keys (git-ignored)
 ├── google_credentials.json     # Google service account key (git-ignored)
