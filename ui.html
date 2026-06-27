@@ -426,6 +426,29 @@
     </div>
   </div>
 
+  <!-- ── Title Filters ── -->
+  <div class="settings-section">
+    <div class="settings-section-title">Title Filters</div>
+    <div class="settings-field">
+      <span class="field-label">Role keywords (must match)</span>
+      <div class="field-desc">A job title must contain at least one of these phrases to be considered a candidate. Change this to match your target role — e.g. replace "product manager" lines with "software engineer" or "data scientist". One phrase per line. Leave empty to accept all titles.</div>
+      <textarea id="title-keywords-input" class="textarea-input" rows="6"
+                placeholder="product manager&#10;product management&#10;product lead&#10;head of product&#10;product owner"></textarea>
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Excluded titles (exact phrase)</span>
+      <div class="field-desc">Titles containing any of these phrases are rejected outright, even if they match a role keyword above. Useful for filtering adjacent roles (e.g. "program manager" when searching for PMs). One phrase per line.</div>
+      <textarea id="excluded-titles-input" class="textarea-input" rows="4"
+                placeholder="program manager&#10;project manager&#10;program management"></textarea>
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Excluded title words (whole word)</span>
+      <div class="field-desc">Titles containing any of these as a whole word are rejected. Useful for blocking adjacent professions. For example, "engineer" blocks "AI Engineer" but not "Engineering Manager". Comma-separated.</div>
+      <input type="text" id="excluded-title-words-input" class="text-input-sm"
+             placeholder="engineer, engineering, architect, developer, scientist">
+    </div>
+  </div>
+
   <!-- ── Scoring & Filters ── -->
   <div class="settings-section">
     <div class="settings-section-title">Scoring &amp; Filters</div>
@@ -791,6 +814,13 @@
       document.getElementById('linkedin-search-input').value     = data.linkedin_search_term || 'Product Manager';
       document.getElementById('builtin-enabled-cb').checked      = data.builtin_enabled;
       document.getElementById('builtin-url-input').value         = data.builtin_url || '';
+      // Title Filters
+      const titleKws   = data.title_keywords       || [];
+      const exclTitles = data.excluded_titles      || [];
+      const exclWords  = data.excluded_title_words || [];
+      document.getElementById('title-keywords-input').value       = titleKws.join('\n');
+      document.getElementById('excluded-titles-input').value      = exclTitles.join('\n');
+      document.getElementById('excluded-title-words-input').value = exclWords.join(', ');
       // Scoring & Filters
       const tiers = data.seniority_tiers || [];
       document.getElementById('seniority-tiers-input').value     = tiers.join('\n');
@@ -824,6 +854,13 @@
     const linkedinSearchTerm = document.getElementById('linkedin-search-input').value.trim();
     const builtinEnabled     = document.getElementById('builtin-enabled-cb').checked;
     const builtinUrl         = document.getElementById('builtin-url-input').value.trim();
+    // Title Filters
+    const titleKeywords      = document.getElementById('title-keywords-input').value
+                                 .split('\n').map(s => s.trim()).filter(Boolean);
+    const excludedTitles     = document.getElementById('excluded-titles-input').value
+                                 .split('\n').map(s => s.trim()).filter(Boolean);
+    const excludedTitleWords = document.getElementById('excluded-title-words-input').value
+                                 .split(',').map(s => s.trim()).filter(Boolean);
     // Scoring & Filters
     const seniorityTiers     = document.getElementById('seniority-tiers-input').value
                                  .split('\n').map(s => s.trim()).filter(Boolean);
@@ -847,6 +884,9 @@
           linkedin_search_term: linkedinSearchTerm,
           builtin_enabled:      builtinEnabled,
           builtin_url:          builtinUrl,
+          title_keywords:       titleKeywords,
+          excluded_titles:      excludedTitles,
+          excluded_title_words: excludedTitleWords,
           seniority_tiers:      seniorityTiers,
           preferred_locations:  preferredLocations,
           salary_minimum:       salaryMinimum,

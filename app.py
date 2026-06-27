@@ -113,22 +113,34 @@ _DEFAULT_SENIORITY_TIERS = [
     "vp", "vice president", "cpo", "head of", "director",
     "principal", "staff", "lead", "senior", "group",
 ]
+_DEFAULT_TITLE_KEYWORDS = [
+    "product manager", "product management", "product lead", "product director",
+    "vp product", "head of product", "chief product", "product owner",
+]
+_DEFAULT_EXCLUDED_TITLES = ["program manager", "project manager", "program management"]
+_DEFAULT_EXCLUDED_TITLE_WORDS = [
+    "engineer", "engineering", "architect", "developer", "scientist",
+    "consultant", "devops", "sre",
+]
 
 
 @app.get("/config")
 async def get_config():
     config = _read_config()
     return JSONResponse({
-        "score_threshold":      config.get("score_threshold", 5.0),
-        "top_applicant":        config.get("top_applicant", False),
-        "linkedin_enabled":     config.get("linkedin_enabled", True),
-        "linkedin_search_term": config.get("linkedin_search_term", "Product Manager"),
-        "builtin_enabled":      config.get("builtin_enabled", False),
-        "builtin_url":          config.get("builtin_url", ""),
-        "seniority_tiers":      config.get("seniority_tiers", _DEFAULT_SENIORITY_TIERS),
-        "preferred_locations":  config.get("preferred_locations", ["remote", "miami"]),
-        "salary_minimum":       config.get("salary_minimum", 0),
-        "google_sheet_url":     config.get("google_sheet_url", ""),
+        "score_threshold":        config.get("score_threshold", 5.0),
+        "top_applicant":          config.get("top_applicant", False),
+        "linkedin_enabled":       config.get("linkedin_enabled", True),
+        "linkedin_search_term":   config.get("linkedin_search_term", "Product Manager"),
+        "builtin_enabled":        config.get("builtin_enabled", False),
+        "builtin_url":            config.get("builtin_url", ""),
+        "title_keywords":         config.get("title_keywords",        _DEFAULT_TITLE_KEYWORDS),
+        "excluded_titles":        config.get("excluded_titles",        _DEFAULT_EXCLUDED_TITLES),
+        "excluded_title_words":   config.get("excluded_title_words",   _DEFAULT_EXCLUDED_TITLE_WORDS),
+        "seniority_tiers":        config.get("seniority_tiers",        _DEFAULT_SENIORITY_TIERS),
+        "preferred_locations":    config.get("preferred_locations",    ["remote", "miami"]),
+        "salary_minimum":         config.get("salary_minimum", 0),
+        "google_sheet_url":       config.get("google_sheet_url", ""),
     })
 
 
@@ -139,6 +151,9 @@ class ConfigBody(BaseModel):
     linkedin_search_term: str = "Product Manager"
     builtin_enabled: bool = False
     builtin_url: str = ""
+    title_keywords: List[str] = []
+    excluded_titles: List[str] = []
+    excluded_title_words: List[str] = []
     seniority_tiers: List[str] = []
     preferred_locations: List[str] = ["remote", "miami"]
     salary_minimum: float = 0
@@ -154,6 +169,9 @@ async def save_config(body: ConfigBody):
     config["linkedin_search_term"] = body.linkedin_search_term
     config["builtin_enabled"]      = body.builtin_enabled
     config["builtin_url"]          = body.builtin_url
+    config["title_keywords"]       = body.title_keywords
+    config["excluded_titles"]      = body.excluded_titles
+    config["excluded_title_words"] = body.excluded_title_words
     config["seniority_tiers"]      = body.seniority_tiers
     config["preferred_locations"]  = body.preferred_locations
     config["salary_minimum"]       = body.salary_minimum

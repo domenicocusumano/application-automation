@@ -300,19 +300,33 @@ def fetch_job_description(page, url):
             else:
                 raise
 
-        # Try to expand "Show more" if present
-        try:
-            page.click("button[aria-label='Click to see more description']", timeout=3000)
-            time.sleep(1)
-        except Exception:
-            pass
+        # Expand "Show more" / "more" / "Read full description" accordions
+        for more_sel in [
+            "button.show-more-less-html__button--more",
+            "button[aria-label='Click to see more description']",
+            "a.show-more-less-html__button--more",
+            "button:has-text('Show more')",
+            "a:has-text('more')",
+        ]:
+            try:
+                btn = page.query_selector(more_sel)
+                if btn and btn.is_visible():
+                    btn.click()
+                    time.sleep(1)
+                    break
+            except Exception:
+                pass
 
-        # Extract job description text — try LinkedIn selectors then generic
+        # Extract job description — LinkedIn selectors first, then generic fallbacks
         desc = ""
         for selector in [
+            # LinkedIn "About the job" section
             ".jobs-description__content",
+            ".jobs-box__html-content",
             ".description__text",
             ".show-more-less-html__markup",
+            "div.jobs-description",
+            # Generic
             "[class*='description']",
             "article",
             "main",
@@ -813,20 +827,38 @@ def run_pipeline(jobs, test_scoring_only=False):
 
             print(f"[{i}/{len(jobs)}]  {title} @ {company}")
 
-            # 1. Fetch job description — use pre-scraped text if available (e.g. Built-in),
-            #    otherwise fetch from the apply URL then fall back to linkedin_url.
+            # 1. Fetch job description
+            #    Primary:    apply URL (always the authoritative source)
+            #    Fallback 1: pre-scraped listing text (BuiltIn "The Role")
+            #    Fallback 2: listing page URL (LinkedIn "About the job" / BuiltIn page)
+            #    No JD:      log to Applications and skip — don't create an application
             print("      Fetching job description...")
-            jd = job.get("description", "")
-            if jd:
-                print("      Using pre-scraped description.")
-            else:
-                if url:
-                    jd = fetch_job_description(page, url)
-                if not jd and linkedin_url and linkedin_url != url:
-                    jd = fetch_job_description(page, linkedin_url)
+            jd = ""
+
+            if url:
+                jd = fetch_job_description(page, url)
+                if jd:
+                    print(f"      Got description from apply URL ({len(jd)} chars)")
 
             if not jd:
-                print("      Could not fetch job description -- scoring from title/company only")
+                scraped_desc = job.get("description", "")
+                if scraped_desc and len(scraped_desc) > 200:
+                    jd = scraped_desc
+                    print(f"      Using pre-scraped listing description ({len(jd)} chars)")
+
+            if not jd and linkedin_url and linkedin_url != url:
+                jd = fetch_job_description(page, linkedin_url)
+                if jd:
+                    print(f"      Got description from listing page ({len(jd)} chars)")
+
+            if not jd:
+                print("      Could not fetch job description by any means — logging and skipping")
+                log_job_to_sheet(
+                    job, "N/A",
+                    "Could not fetch job description — no application created",
+                    tab_name="Applications",
+                )
+                continue
 
             # 2. Score + hard disqualification checks
             print("      Scoring with Claude...")
