@@ -244,13 +244,21 @@ async def scrape_job_detail(page, job_url: str) -> dict:
         await page.goto(job_url, wait_until="domcontentloaded", timeout=DETAIL_TIMEOUT)
         await page.wait_for_timeout(1000)
 
-        # Breadcrumb first-link is the most reliable company source on BuiltIn
+        # Company name: h2 in the job card header is the most reliable on BuiltIn,
+        # followed by breadcrumb first-link, then various data-testid/class selectors.
         for sel in [
+            # BuiltIn renders company name inside an h2 in the job header card
+            "h2 a[href*='/companies/']",
+            "h2 a[href*='/company/']",
+            "h2 a",
+            # Breadcrumb
             "nav[aria-label*='breadcrumb'] a:first-child",
             "[data-testid='breadcrumb'] a:first-child",
             "[class*='breadcrumb'] a:first-child",
+            # Explicit data-testid
             "[data-testid='employer-name']", "[data-testid='company-title']",
             "[data-testid='company-name']",
+            # Class-based
             ".company-title", ".employer-name",
             "a[href*='/companies/']", "a[href*='/company/']",
             "[class*='CompanyName']", "[class*='company-name']",
@@ -265,13 +273,24 @@ async def scrape_job_detail(page, job_url: str) -> dict:
             except Exception:
                 pass
 
-        # JS fallback: breadcrumb first link, then parse "at [Company]" from page title
+        # JS fallback: h2 near the job title h1, then breadcrumb, then page <title>
         if not result["company"]:
             try:
                 result["company"] = await page.evaluate("""() => {
-                    const bc = document.querySelector(
-                        '[class*="breadcrumb"], nav[aria-label*="breadcrumb"]'
-                    );
+                    // h2 that is a sibling/cousin of the h1 job title (BuiltIn card layout)
+                    const h1 = document.querySelector('h1');
+                    if (h1) {
+                        const card = h1.closest('[class*="card"], [class*="header"], [class*="Hero"], main > div') || h1.parentElement;
+                        if (card) {
+                            const h2 = card.querySelector('h2');
+                            if (h2) {
+                                const t = (h2.innerText || '').trim();
+                                if (t && t.length < 120) return t;
+                            }
+                        }
+                    }
+                    // Breadcrumb first link
+                    const bc = document.querySelector('[class*="breadcrumb"], nav[aria-label*="breadcrumb"]');
                     if (bc) {
                         const link = bc.querySelector('a');
                         if (link) {
@@ -279,7 +298,7 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                             if (t && t.length < 120) return t;
                         }
                     }
-                    // Fallback: parse "Job Title at Company | Built In" from <title>
+                    // Parse "Job Title at Company | Built In" from <title>
                     const m = (document.title || '').match(/\\bat\\s+(.+?)\\s*(?:\\||$)/i);
                     return m ? m[1].trim() : '';
                 }""") or ""
@@ -334,31 +353,65 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                 el = await page.query_selector(expand_sel)
                 if el and await el.is_visible():
                     await el.click()
-                    await page.wait_for_timeout(1500)
+                    await page.wait_for_timeout(2000)
                     break
         except Exception:
             pass
 
-        for sel in [
-            "[data-testid='job-description']", ".job-description",
-            "#job-description", "[class*='JobDescription']",
-            "[class*='job-description']",
-            # BuiltIn "The Role" section containers
-            "[class*='job-details']", "[class*='JobDetails']",
-            "section[class*='job']", "[class*='the-role']", "[class*='TheRole']",
-            "main article", "main", "article",
-        ]:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    text = (await el.inner_text()).strip()
-                    if len(text) > 200:
-                        result["description"] = text[:7000]
-                        break
-            except Exception:
-                pass
+        # Primary: JS extractor walks from the "The Role" heading — most reliable on BuiltIn
+        try:
+            jd_from_role = await page.evaluate("""() => {
+                // Find any element whose sole text content is "The Role"
+                for (const el of document.querySelectorAll('div, section, h1, h2, h3, h4')) {
+                    if ((el.innerText || '').trim() !== 'The Role') continue;
+                    // Gather text from siblings that follow, stopping at the next section heading
+                    let text = '';
+                    let sibling = el.nextElementSibling;
+                    while (sibling) {
+                        const sibText = (sibling.innerText || '').trim();
+                        // Stop at sibling headings like "The Company", "Benefits", etc.
+                        if (sibling.matches('h1,h2,h3,h4') && sibText && sibText !== 'The Role') break;
+                        text += sibText + '\\n';
+                        sibling = sibling.nextElementSibling;
+                        if (text.length > 7000) break;
+                    }
+                    // If siblings gave nothing, grab the parent's text (role content is a child)
+                    if (text.trim().length < 100) {
+                        const parent = el.parentElement;
+                        if (parent) text = (parent.innerText || '').trim();
+                    }
+                    if (text.trim().length > 100) return text.trim().slice(0, 7000);
+                }
+                return '';
+            }""") or ""
+            if jd_from_role:
+                result["description"] = jd_from_role
+        except Exception:
+            pass
+
+        # CSS selector fallbacks if JS walk found nothing
+        if not result["description"]:
+            for sel in [
+                "[data-testid='job-description']", ".job-description",
+                "#job-description", "[class*='JobDescription']",
+                "[class*='job-description']",
+                "[class*='job-details']", "[class*='JobDetails']",
+                "section[class*='job']", "[class*='the-role']", "[class*='TheRole']",
+                "main article", "article",
+            ]:
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        text = (await el.inner_text()).strip()
+                        if len(text) > 200:
+                            result["description"] = text[:7000]
+                            break
+                except Exception:
+                    pass
 
         # ── Easy Apply detection ──
+        # Check button/link elements directly — avoid scanning broad containers
+        # (sticky divs can contain "Easy Apply" text in unrelated parts of the page)
         for sel in [
             "button:has-text('Easy Apply')", "a:has-text('Easy Apply')",
             "[data-testid*='easy-apply']", ".easy-apply",
@@ -372,14 +425,18 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                 pass
 
         if not result["easy_apply"]:
-            for sticky_sel in ["[class*='sticky']", "[class*='fixed']", "footer"]:
-                try:
-                    el = await page.query_selector(sticky_sel)
-                    if el and "easy apply" in (await el.inner_text()).lower():
-                        result["easy_apply"] = True
-                        break
-                except Exception:
-                    pass
+            try:
+                result["easy_apply"] = await page.evaluate("""() => {
+                    // Only flag Easy Apply when a visible <a> or <button> has exactly
+                    // that text — not just any container that mentions "easy apply"
+                    for (const el of document.querySelectorAll('a, button')) {
+                        const text = (el.innerText || '').trim().toLowerCase();
+                        if (text === 'easy apply') return true;
+                    }
+                    return false;
+                }""") or False
+            except Exception:
+                pass
 
         # ── External apply URL ──
         # If Easy Apply, the apply URL stays as the Built-in listing URL.
@@ -404,16 +461,19 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                 except Exception:
                     pass
 
-            # JS fallback: any <a> whose text is exactly "Apply" / "Apply Now"
-            # with an external href (catches sticky footer buttons missed by CSS selectors)
+            # JS fallback: any <a> whose text normalises to "APPLY" or "APPLY NOW"
+            # Strip non-alpha chars first so the pencil-icon prefix ("✎ APPLY") doesn't
+            # prevent a match. Also handles protocol-relative href ("//greenhouse.io/...")
             if result["apply_url"] == job_url:
                 try:
                     href = await page.evaluate("""() => {
                         for (const a of document.querySelectorAll('a[href]')) {
-                            const text = (a.innerText || a.textContent || '').trim().toUpperCase();
-                            const href = a.getAttribute('href') || '';
+                            const raw = (a.innerText || a.textContent || '').trim();
+                            const text = raw.replace(/[^A-Za-z\\s]/g, '').trim().toUpperCase();
+                            let href = a.getAttribute('href') || '';
+                            if (href.startsWith('//')) href = 'https:' + href;
                             if ((text === 'APPLY' || text === 'APPLY NOW') &&
-                                href.startsWith('http') &&
+                                (href.startsWith('http')) &&
                                 !href.toLowerCase().includes('builtin.com')) {
                                 return href;
                             }
