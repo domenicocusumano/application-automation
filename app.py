@@ -117,6 +117,8 @@ _DEFAULT_EXCLUDED_TITLE_WORDS: list = []
 async def get_config():
     config = _read_config()
     return JSONResponse({
+        "first_name":             config.get("first_name", ""),
+        "last_name":              config.get("last_name", ""),
         "score_threshold":        config.get("score_threshold", 5.0),
         "top_applicant":          config.get("top_applicant", False),
         "linkedin_enabled":       config.get("linkedin_enabled", True),
@@ -130,10 +132,15 @@ async def get_config():
         "preferred_locations":    config.get("preferred_locations",    ["remote", "miami"]),
         "salary_minimum":         config.get("salary_minimum", 0),
         "google_sheet_url":       config.get("google_sheet_url", ""),
+        "scoring_model":          config.get("scoring_model",         "claude-sonnet-4-6"),
+        "resume_model":           config.get("resume_model",          "claude-sonnet-4-6"),
+        "resume_output_format":   config.get("resume_output_format",  "docx"),
     })
 
 
 class ConfigBody(BaseModel):
+    first_name: str = ""
+    last_name: str = ""
     score_threshold: float
     top_applicant: bool = False
     linkedin_enabled: bool = True
@@ -147,11 +154,16 @@ class ConfigBody(BaseModel):
     preferred_locations: List[str] = ["remote", "miami"]
     salary_minimum: float = 0
     google_sheet_url: str = ""
+    scoring_model: str = "claude-sonnet-4-6"
+    resume_model: str = "claude-sonnet-4-6"
+    resume_output_format: str = "docx"
 
 
 @app.post("/config")
 async def save_config(body: ConfigBody):
     config = _read_config()
+    config["first_name"]           = body.first_name
+    config["last_name"]            = body.last_name
     config["score_threshold"]      = body.score_threshold
     config["top_applicant"]        = body.top_applicant
     config["linkedin_enabled"]     = body.linkedin_enabled
@@ -165,6 +177,9 @@ async def save_config(body: ConfigBody):
     config["preferred_locations"]  = body.preferred_locations
     config["salary_minimum"]       = body.salary_minimum
     config["google_sheet_url"]     = body.google_sheet_url
+    config["scoring_model"]        = body.scoring_model
+    config["resume_model"]         = body.resume_model
+    config["resume_output_format"] = body.resume_output_format
     CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return JSONResponse({"ok": True})
 

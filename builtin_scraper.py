@@ -247,11 +247,11 @@ async def scrape_job_detail(page, job_url: str) -> dict:
         # Company name: h2 in the job card header is the most reliable on BuiltIn,
         # followed by breadcrumb first-link, then various data-testid/class selectors.
         for sel in [
-            # BuiltIn renders company name inside an h2 in the job header card
-            "h2 a[href*='/companies/']",
-            "h2 a[href*='/company/']",
-            "h2 a",
-            # Breadcrumb
+            # BuiltIn renders company name as <a href="/company/..."><h2>Name</h2></a>
+            # — the h2 is a direct child of the company anchor, NOT the other way around
+            "a[href*='/company/'] > h2",
+            "a[href*='/companies/'] > h2",
+            # Breadcrumb (first link = company name)
             "nav[aria-label*='breadcrumb'] a:first-child",
             "[data-testid='breadcrumb'] a:first-child",
             "[class*='breadcrumb'] a:first-child",
@@ -277,16 +277,13 @@ async def scrape_job_detail(page, job_url: str) -> dict:
         if not result["company"]:
             try:
                 result["company"] = await page.evaluate("""() => {
-                    // h2 that is a sibling/cousin of the h1 job title (BuiltIn card layout)
-                    const h1 = document.querySelector('h1');
-                    if (h1) {
-                        const card = h1.closest('[class*="card"], [class*="header"], [class*="Hero"], main > div') || h1.parentElement;
-                        if (card) {
-                            const h2 = card.querySelector('h2');
-                            if (h2) {
-                                const t = (h2.innerText || '').trim();
-                                if (t && t.length < 120) return t;
-                            }
+                    // BuiltIn structure: <a href="/company/..."><h2>Company Name</h2></a>
+                    // Select h2 that is a direct child of a company link
+                    for (const a of document.querySelectorAll('a[href*="/company/"], a[href*="/companies/"]')) {
+                        const h2 = a.querySelector(':scope > h2');
+                        if (h2) {
+                            const t = (h2.innerText || '').trim();
+                            if (t && t.length < 120) return t;
                         }
                     }
                     // Breadcrumb first link

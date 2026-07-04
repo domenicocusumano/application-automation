@@ -1,4 +1,6 @@
 {
+  "first_name": "Jane",
+  "last_name": "Doe",
   "score_threshold": 6.5,
   "top_applicant": false,
   "linkedin_enabled": true,
@@ -24,8 +26,10 @@
   ],
   "salary_minimum": 0,
   "google_sheet_url": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/",
-  "resume_prefix": "Firstname_Lastname",
   "gdrive_folder_id": "YOUR_GOOGLE_DRIVE_FOLDER_ID",
+  "scoring_model": "claude-sonnet-4-6",
+  "resume_model": "claude-sonnet-4-6",
+  "resume_output_format": "docx",
   "applicant": {
     "first_name": "Jane",
     "preferred_name": "Jane",

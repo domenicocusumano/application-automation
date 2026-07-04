@@ -405,7 +405,7 @@
 </div>
 
 <div id="panel-resume" class="panel prompt-panel">
-  <div class="prompt-meta">Dom_Cusumano_General_Resume (.pdf or .docx) — used as the source resume for every tailored build</div>
+  <div class="prompt-meta" id="resume-meta">base_resume/ (.pdf or .docx) — used as the source resume for every tailored build</div>
   <div class="resume-controls">
     <input type="file" id="resume-file-input" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none" onchange="uploadResume()">
     <button class="upload-btn" onclick="document.getElementById('resume-file-input').click()">Upload New Resume</button>
@@ -416,6 +416,21 @@
 
 <div id="panel-settings" class="panel">
 
+  <!-- ── Your Profile ── -->
+  <div class="settings-section">
+    <div class="settings-section-title">Your Profile</div>
+    <div class="settings-field">
+      <span class="field-label">First name</span>
+      <div class="field-desc">Used to name generated resume files (FirstName_LastName_Company_Role.docx).</div>
+      <input type="text" id="first-name-input" class="text-input-sm" placeholder="Jane">
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Last name</span>
+      <div class="field-desc">Used together with first name to name generated resume files.</div>
+      <input type="text" id="last-name-input" class="text-input-sm" placeholder="Doe">
+    </div>
+  </div>
+
   <!-- ── Pipeline ── -->
   <div class="settings-section">
     <div class="settings-section-title">Pipeline</div>
@@ -423,6 +438,32 @@
       <span class="field-label">Score threshold</span>
       <div class="field-desc">Minimum score (0–10) Claude must give a job in the resume-building phase for it to be accepted. Lower = more jobs processed; higher = more selective.</div>
       <input type="number" id="threshold-input" class="number-input" min="0" max="10" step="0.1">
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Scoring model</span>
+      <div class="field-desc">Model used to evaluate each job against your resume and assign a score. Haiku is ~20× cheaper and accurate enough for pass/fail decisions.</div>
+      <select id="scoring-model-select" class="text-input-sm">
+        <option value="claude-haiku-4-5-20251001">Haiku 4.5 — fastest, cheapest</option>
+        <option value="claude-sonnet-4-6">Sonnet 4.6 — balanced</option>
+        <option value="claude-opus-4-8">Opus 4.8 — most capable</option>
+      </select>
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Resume build model</span>
+      <div class="field-desc">Model used to tailor your resume content for each job. This directly affects output quality — Sonnet or Opus recommended.</div>
+      <select id="resume-model-select" class="text-input-sm">
+        <option value="claude-haiku-4-5-20251001">Haiku 4.5 — fastest, cheapest</option>
+        <option value="claude-sonnet-4-6">Sonnet 4.6 — balanced</option>
+        <option value="claude-opus-4-8">Opus 4.8 — most capable</option>
+      </select>
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Resume output format</span>
+      <div class="field-desc">File format for generated resumes. PDF requires LibreOffice installed (<code>brew install --cask libreoffice</code>). DOCX can be opened and edited in Word.</div>
+      <select id="resume-output-format-select" class="text-input-sm">
+        <option value="docx">DOCX — editable Word document</option>
+        <option value="pdf">PDF — requires LibreOffice</option>
+      </select>
     </div>
   </div>
 
@@ -596,10 +637,14 @@
   // ── RESUME ─────────────────────────────────────────────────────────────────
   async function loadResume() {
     const text = document.getElementById('resume-text');
+    const meta = document.getElementById('resume-meta');
     try {
       const r = await fetch('/resume');
       const data = await r.json();
       text.value = data.filename ? data.text : 'No resume uploaded yet.';
+      if (data.filename && meta) {
+        meta.textContent = data.filename + ' — used as the source resume for every tailored build';
+      }
     } catch (e) {
       console.error('Failed to load resume:', e);
     }
@@ -808,6 +853,8 @@
     try {
       const r = await fetch('/config');
       const data = await r.json();
+      document.getElementById('first-name-input').value          = data.first_name || '';
+      document.getElementById('last-name-input').value           = data.last_name  || '';
       document.getElementById('threshold-input').value           = data.score_threshold;
       document.getElementById('top-applicant-cb').checked        = data.top_applicant;
       document.getElementById('linkedin-enabled-cb').checked     = data.linkedin_enabled ?? true;
@@ -829,6 +876,10 @@
       document.getElementById('salary-minimum-input').value      = data.salary_minimum || 0;
       // Google Sheets
       document.getElementById('google-sheet-url-input').value    = data.google_sheet_url || '';
+      // Models
+      document.getElementById('scoring-model-select').value        = data.scoring_model        || 'claude-sonnet-4-6';
+      document.getElementById('resume-model-select').value         = data.resume_model         || 'claude-sonnet-4-6';
+      document.getElementById('resume-output-format-select').value = data.resume_output_format || 'docx';
       if (data.builtin_enabled) {
         document.getElementById('run-btn').disabled = false;
       }
@@ -847,6 +898,8 @@
 
   async function saveConfig(statusId) {
     const statusEl = document.getElementById(statusId || 'status-settings');
+    const firstName          = document.getElementById('first-name-input').value.trim();
+    const lastName           = document.getElementById('last-name-input').value.trim();
     const rawThreshold       = parseFloat(document.getElementById('threshold-input').value);
     const threshold          = isNaN(rawThreshold) ? 5.0 : rawThreshold;
     const topApplicant       = document.getElementById('top-applicant-cb').checked;
@@ -870,6 +923,10 @@
     const salaryMinimum      = isNaN(rawSalary) ? 0 : rawSalary;
     // Google Sheets
     const googleSheetUrl     = document.getElementById('google-sheet-url-input').value.trim();
+    // Models
+    const scoringModel        = document.getElementById('scoring-model-select').value;
+    const resumeModel         = document.getElementById('resume-model-select').value;
+    const resumeOutputFormat  = document.getElementById('resume-output-format-select').value;
 
     statusEl.textContent = 'Saving...';
     statusEl.className = 'save-status';
@@ -878,6 +935,8 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          first_name:           firstName,
+          last_name:            lastName,
           score_threshold:      threshold,
           top_applicant:        topApplicant,
           linkedin_enabled:     linkedinEnabled,
@@ -891,6 +950,9 @@
           preferred_locations:  preferredLocations,
           salary_minimum:       salaryMinimum,
           google_sheet_url:     googleSheetUrl,
+          scoring_model:         scoringModel,
+          resume_model:          resumeModel,
+          resume_output_format:  resumeOutputFormat,
         }),
       });
       const data = await r.json();
