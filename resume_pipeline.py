@@ -58,11 +58,15 @@ CONFIG_FILE         = os.path.join(SCRIPT_DIR, "config.json")
 def _load_pipeline_config():
     """Reads scoring/filter settings and applicant info from config.json."""
     defaults = {
+        "first_name":          "",
+        "last_name":           "",
         "score_threshold":     6.5,
         "salary_minimum":      0,
         "preferred_locations": ["remote"],
-        "resume_prefix":       "My_Resume",
         "gdrive_folder_id":    "",
+        "scoring_model":        "claude-sonnet-4-6",
+        "resume_model":         "claude-sonnet-4-6",
+        "resume_output_format": "docx",
     }
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -346,7 +350,7 @@ def fetch_job_description(page, url):
 
 # ── CLAUDE SCORING ─────────────────────────────────────────────────────────────
 
-def score_job(client, job, job_description, salary_minimum=0, preferred_locations=None):
+def score_job(client, job, job_description, salary_minimum=0, preferred_locations=None, model="claude-sonnet-4-6"):
     """Scores a job against Dom's background. Returns dict with score + assessment +
     hard disqualification flags for salary and location."""
 
@@ -373,9 +377,7 @@ Read the full job description carefully for any location requirement hidden in t
 - If fully remote with no proximity requirement, set location_disqualify: false.
 """
 
-    prompt = f"""{BACKGROUND_PROMPT}
-
----
+    prompt = f"""---
 
 JOB TO EVALUATE:
 Title: {job.get('title')}
@@ -416,10 +418,14 @@ Return ONLY a JSON object:
 No other text. Just the JSON."""
 
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=model,
         max_tokens=1200,
+        system=[{"type": "text", "text": BACKGROUND_PROMPT, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": prompt}]
     )
+    usage = response.usage
+    if getattr(usage, "cache_read_input_tokens", 0):
+        print(f"      [cache] {usage.cache_read_input_tokens:,} tokens read from cache")
 
     raw = response.content[0].text.strip()
     raw = re.sub(r'^```json\s*', '', raw)
@@ -434,7 +440,7 @@ No other text. Just the JSON."""
 
 # ── RESUME BUILDER ─────────────────────────────────────────────────────────────
 
-def build_resume_content(client, job, job_description, score_data):
+def build_resume_content(client, job, job_description, score_data, model="claude-sonnet-4-6"):
     """Asks Claude to produce the full tailored resume content as structured JSON."""
 
     role_type   = score_data.get("role_type", "other")
@@ -471,9 +477,7 @@ def build_resume_content(client, job, job_description, score_data):
         resume_text = "\n".join(p.text for p in doc.paragraphs)
         resume_content_block = {"type": "text", "text": resume_text}
 
-    text_prompt = f"""{BACKGROUND_PROMPT}
-
-═══════════════════════════════════════════════════
+    text_prompt = f"""═══════════════════════════════════════════════════
 YOUR TASK: BUILD A TAILORED RESUME
 ═══════════════════════════════════════════════════
 Role:       {job.get('title')}
@@ -542,8 +546,9 @@ Return ONLY a JSON object. No markdown. No extra text. No explanation.
 }}"""
 
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=model,
         max_tokens=6000,
+        system=[{"type": "text", "text": BACKGROUND_PROMPT, "cache_control": {"type": "ephemeral"}}],
         messages=[{
             "role": "user",
             "content": [
@@ -559,6 +564,9 @@ Return ONLY a JSON object. No markdown. No extra text. No explanation.
             ],
         }]
     )
+    usage = response.usage
+    if getattr(usage, "cache_read_input_tokens", 0):
+        print(f"      [cache] {usage.cache_read_input_tokens:,} tokens read from cache")
 
     raw = response.content[0].text.strip()
     raw = re.sub(r'^```json\s*', '', raw)
@@ -781,6 +789,9 @@ def run_pipeline(jobs, test_scoring_only=False):
     salary_minimum     = pipeline_cfg["salary_minimum"]
     preferred_locs     = pipeline_cfg["preferred_locations"]
     gdrive_folder      = pipeline_cfg.get("gdrive_folder_id") or GDRIVE_FOLDER_ID
+    scoring_model      = pipeline_cfg.get("scoring_model", "claude-sonnet-4-6")
+    resume_model        = pipeline_cfg.get("resume_model",         "claude-sonnet-4-6")
+    resume_output_fmt   = pipeline_cfg.get("resume_output_format", "docx").lower()
 
     print(f"\n{'='*65}")
     mode = "TEST MODE - Scoring Only" if test_scoring_only else "Starting"
@@ -863,7 +874,7 @@ def run_pipeline(jobs, test_scoring_only=False):
 
             # 2. Score + hard disqualification checks
             print("      Scoring with Claude...")
-            score_data        = score_job(client, job, jd, salary_minimum, preferred_locs)
+            score_data        = score_job(client, job, jd, salary_minimum, preferred_locs, model=scoring_model)
             score             = score_data.get("score", 0)
             assessment        = score_data.get("assessment", "")
             salary_disqualify = score_data.get("salary_disqualify", False)
@@ -890,24 +901,48 @@ def run_pipeline(jobs, test_scoring_only=False):
                 else:
                     print(f"      Score >= {score_threshold} -- building resume...")
 
-                    resume_data = build_resume_content(client, job, jd, score_data)
+                    resume_data = build_resume_content(client, job, jd, score_data, model=resume_model)
                     drive_link  = None
 
                     if resume_data:
-                        _resume_prefix = pipeline_cfg.get("resume_prefix", "My_Resume")
-                        title_slug  = score_data.get("title_for_file", "Senior_PM").replace(" ", "_")
-                        # Only append company if it's not already in the slug
+                        first_name   = pipeline_cfg.get("first_name", "").strip()
+                        last_name    = pipeline_cfg.get("last_name", "").strip()
+                        name_prefix  = f"{first_name}_{last_name}" if first_name or last_name else "Resume"
+                        title_slug   = score_data.get("title_for_file", "Role").replace(" ", "_")
                         company_slug = company.replace(" ", "_")
-                        if company_slug.lower() not in title_slug.lower():
-                            filename = f"{_resume_prefix}_{title_slug}_{company_slug}.docx"
-                        else:
-                            filename = f"{_resume_prefix}_{title_slug}.docx"
                         # Save to a resumes/ folder in the project directory
                         resumes_dir = os.path.join(SCRIPT_DIR, "resumes")
                         os.makedirs(resumes_dir, exist_ok=True)
-                        output_path = os.path.join(resumes_dir, filename)
 
-                        success = build_docx(resume_data, output_path)
+                        docx_filename = f"{name_prefix}_{company_slug}_{title_slug}.docx"
+                        docx_path     = os.path.join(resumes_dir, docx_filename)
+                        success       = build_docx(resume_data, docx_path)
+
+                        if success and resume_output_fmt == "pdf":
+                            pdf_filename = docx_filename.replace(".docx", ".pdf")
+                            pdf_path     = os.path.join(resumes_dir, pdf_filename)
+                            try:
+                                conv = subprocess.run(
+                                    ["soffice", "--headless", "--convert-to", "pdf",
+                                     "--outdir", resumes_dir, docx_path],
+                                    capture_output=True, text=True
+                                )
+                                pdf_ok = conv.returncode == 0 and os.path.exists(pdf_path)
+                                if not pdf_ok:
+                                    print(f"      PDF conversion failed, keeping .docx: {conv.stderr[:200]}")
+                            except FileNotFoundError:
+                                print("      LibreOffice (soffice) not found — keeping .docx. Install with: brew install --cask libreoffice")
+                                pdf_ok = False
+                            if pdf_ok:
+                                os.remove(docx_path)
+                                output_path = pdf_path
+                                filename    = pdf_filename
+                            else:
+                                output_path = docx_path
+                                filename    = docx_filename
+                        else:
+                            output_path = docx_path
+                            filename    = docx_filename
 
                         if success:
                             print(f"      Uploading to Google Drive...")

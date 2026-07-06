@@ -1,6 +1,6 @@
 # Job Application Automation
 
-A self-hosted pipeline that scrapes job listings from LinkedIn and Built-in.com, scores each one against your background with Claude, and builds a tailored `.docx` resume for every strong match — uploading it to Google Drive and logging everything to a Google Sheet. All settings are controlled from a local web UI.
+A self-hosted pipeline that scrapes job listings from LinkedIn and Built-in.com, scores each one against your background with Claude, and builds a tailored `.docx` or `.pdf` resume for every strong match — uploading it to Google Drive and logging everything to a Google Sheet. All settings are controlled from a local web UI.
 
 The pipeline is **fully role-agnostic** — there are no baked-in defaults for any specific role type. All search terms, title filters, seniority tiers, and the scoring prompt are configured through the UI. It works equally well for engineering, design, data science, marketing, operations, or any other role.
 
@@ -56,6 +56,11 @@ application_filler.py  ⚠ experimental
 - **Python 3.9+**
 - **Node.js 18+** — used by the resume builder to generate `.docx` files
 - **Google Chrome** — the form filler uses your real Chrome install to avoid bot detection; falls back to Playwright's bundled Chromium if Chrome is not found
+- **LibreOffice** *(optional)* — required only if you enable **PDF output** in Settings. Install with:
+  ```bash
+  brew install --cask libreoffice
+  ```
+  If LibreOffice is not installed and PDF is selected, the pipeline falls back to `.docx` automatically.
 
 ### Python packages
 
@@ -172,7 +177,11 @@ All settings are managed through the web UI and persisted to `config.json`. You 
 
 | Setting | Description |
 |---|---|
+| **First name / Last name** | Used to name generated resume files: `FirstName_LastName_Company_Role.docx` |
 | **Score threshold** | Minimum Claude score (0–10) to trigger a resume build |
+| **Scoring model** | Claude model used to evaluate and score each job. Haiku is ~20× cheaper and accurate enough for pass/fail decisions. |
+| **Resume build model** | Claude model used to write the tailored resume content. Sonnet or Opus recommended for output quality. |
+| **Resume output format** | `DOCX` (default, editable in Word) or `PDF` (requires LibreOffice — see Prerequisites) |
 | **Top Applicant feed** | Also scrape LinkedIn's "Top Applicant" feed (requires LinkedIn Premium) |
 | **LinkedIn enabled** | Run the LinkedIn scraper |
 | **LinkedIn search term** | Keyword used for the Phase 2 LinkedIn keyword search (e.g. `Software Engineer`, `Data Scientist`, `UX Designer`) |
@@ -286,7 +295,7 @@ Processes a list of job candidates end-to-end:
    - If the JD requires living near an office city not in your preferred locations → Skips tab
    - Occasional travel (≤ once/month) is not disqualifying
 
-4. **Builds a tailored `.docx` resume** for any job scoring ≥ the score threshold (requires a base resume in `base_resume/`):
+4. **Builds a tailored resume** (`.docx` or `.pdf`, configurable) for any job scoring ≥ the score threshold (requires a base resume in `base_resume/`):
    - Experience bullets reordered to lead with the most relevant stories for this specific role
    - Competency categories reordered to match the JD's priorities
    - Tailored summary written for the role
@@ -395,7 +404,7 @@ application-automation/
 ├── base_resume/                # Drop your base resume here (gitignored — never committed)
 │   └── Your_Resume.docx        #   or upload it via the web UI
 │
-├── resumes/                    # Generated tailored .docx resumes (gitignored)
+├── resumes/                    # Generated tailored resumes (.docx or .pdf, gitignored)
 │
 ├── .env                        # API keys (git-ignored)
 ├── google_credentials.json     # Google service account key (git-ignored)
@@ -453,6 +462,9 @@ The pipeline re-reads `config.json` at the start of each run. Saving settings in
 
 **Duplicate jobs appearing despite being in the sheet**
 Both the `URL` and `Linked In URL` columns are checked from both the Applications and Skips tabs. Built-in jobs are also matched by the numeric job ID extracted from the Built-in URL (so slug changes don't defeat dedup). If duplicates still appear, check that the service account has read access to the sheet and that the Google Sheet URL in Settings is correct.
+
+**PDF output falls back to DOCX**
+LibreOffice is not installed or not on your PATH. Install it with `brew install --cask libreoffice`, then re-run. The pipeline prints a message confirming it fell back and which file was saved.
 
 **Form filler gets blocked by Cloudflare**
 The script detects a CAPTCHA challenge page and pauses for manual solving before continuing. Make sure `HEADLESS = False` (default) so the browser is visible.
