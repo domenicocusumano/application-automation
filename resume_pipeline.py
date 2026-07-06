@@ -921,17 +921,23 @@ def run_pipeline(jobs, test_scoring_only=False):
                         if success and resume_output_fmt == "pdf":
                             pdf_filename = docx_filename.replace(".docx", ".pdf")
                             pdf_path     = os.path.join(resumes_dir, pdf_filename)
-                            conv = subprocess.run(
-                                ["soffice", "--headless", "--convert-to", "pdf",
-                                 "--outdir", resumes_dir, docx_path],
-                                capture_output=True, text=True
-                            )
-                            if conv.returncode == 0 and os.path.exists(pdf_path):
+                            try:
+                                conv = subprocess.run(
+                                    ["soffice", "--headless", "--convert-to", "pdf",
+                                     "--outdir", resumes_dir, docx_path],
+                                    capture_output=True, text=True
+                                )
+                                pdf_ok = conv.returncode == 0 and os.path.exists(pdf_path)
+                                if not pdf_ok:
+                                    print(f"      PDF conversion failed, keeping .docx: {conv.stderr[:200]}")
+                            except FileNotFoundError:
+                                print("      LibreOffice (soffice) not found — keeping .docx. Install with: brew install --cask libreoffice")
+                                pdf_ok = False
+                            if pdf_ok:
                                 os.remove(docx_path)
                                 output_path = pdf_path
                                 filename    = pdf_filename
                             else:
-                                print(f"      PDF conversion failed, keeping .docx: {conv.stderr[:200]}")
                                 output_path = docx_path
                                 filename    = docx_filename
                         else:
