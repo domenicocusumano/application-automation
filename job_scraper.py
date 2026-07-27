@@ -72,6 +72,31 @@ def _load_title_filters(cfg: dict) -> tuple:
 
 # ── GOOGLE SHEETS ──────────────────────────────────────────────────────────────
 
+def normalize_title(title):
+    """
+    Cleans a job title extracted from LinkedIn's DOM.
+    LinkedIn appends hidden accessibility text (e.g. "with verification") to the
+    title link for jobs where the poster/company identity badge is shown — this
+    text isn't part of the real title and causes the same job to be treated as
+    a different one during deduplication. Also collapses stray whitespace.
+
+    Some cards (seen on jobs with an external-apply link) render the title
+    twice in the DOM — a visible span plus a clip-hidden accessibility span
+    with identical text — and inner_text() picks up both, joined by a space
+    (e.g. "Senior Product Manager Senior Product Manager"). Collapse that.
+    """
+    if not title:
+        return ""
+    title = re.sub(r'\s*\bwith verification\b\s*$', '', title.strip(), flags=re.I)
+    title = re.sub(r'\s+', ' ', title).strip()
+
+    half = len(title) // 2
+    if len(title) % 2 == 1 and title[half] == ' ' and title[:half] == title[half + 1:]:
+        title = title[:half]
+
+    return title
+
+
 def normalize_url(url):
     """
     Normalize a URL for deduplication comparison.
@@ -139,8 +164,8 @@ def load_applied_jobs():
                     rows.append({headers[i]: row_vals[i] for i in range(len(headers))})
 
                 for row in rows:
-                    company = str(row.get(COL_COMPANY, "")).strip().lower()
-                    title   = str(row.get(COL_TITLE,   "")).strip().lower()
+                    company = re.sub(r'\s+', ' ', str(row.get(COL_COMPANY, "")).strip()).lower()
+                    title   = normalize_title(str(row.get(COL_TITLE, ""))).lower()
                     if company or title:
                         applied_pairs.add((company, title))
                     # Normalize and store both the apply URL and the LinkedIn URL so
@@ -180,8 +205,8 @@ def already_applied(job, applied_pairs, applied_urls):
         if norm and norm in applied_urls:
             return True
 
-    company = job.get("company", "").lower().strip()
-    title   = job.get("title",   "").lower().strip()
+    company = re.sub(r'\s+', ' ', job.get("company", "").strip()).lower()
+    title   = normalize_title(job.get("title", "")).lower()
 
     if (company, title) in applied_pairs:
         return True
@@ -1029,6 +1054,9 @@ def extract_job_from_card(card, return_reason=False, title_filters=None):
             url = "https://www.linkedin.com" + url
         url = re.sub(r'\?.*$', '', url).rstrip('/')
 
+    title   = normalize_title(title)
+    company = re.sub(r'\s+', ' ', company).strip()
+
     if not title or not url:
         return reject("no_data")
 
@@ -1224,7 +1252,10 @@ def main():
     for job in ranked:
         # Create a unique key from URL (primary) or company+title (fallback)
         url_key = normalize_url(job.get("url", ""))
-        title_key = (job.get("company", "").lower(), job.get("title", "").lower())
+        title_key = (
+            re.sub(r'\s+', ' ', job.get("company", "").strip()).lower(),
+            normalize_title(job.get("title", "")).lower(),
+        )
 
         # Check if we've seen this job already in the ranked list
         if url_key and url_key in seen_in_ranked:

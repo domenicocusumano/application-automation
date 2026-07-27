@@ -304,7 +304,34 @@ def fetch_job_description(page, url):
             else:
                 raise
 
+        desc = ""
+
+        # LinkedIn job pages: locate the "About the job" section by its heading
+        # text rather than CSS classes. LinkedIn's job-view layout uses
+        # build-hashed class names (e.g. "_4e88d095") that change between
+        # deployments, so the old .jobs-description__content-style selectors
+        # below no longer match at all on that page. The "…more" truncation
+        # there is CSS-only (line-clamp) — the full text is already present
+        # in the DOM, so no click is needed to read it in full.
+        if "linkedin.com" in url.lower():
+            try:
+                desc = (page.evaluate("""
+                    () => {
+                        const heading = Array.from(document.querySelectorAll('h1,h2,h3,h4,span,div'))
+                            .find(el => el.textContent.trim() === 'About the job');
+                        if (!heading) return null;
+                        const container = heading.parentElement?.parentElement || heading.parentElement;
+                        return container ? container.innerText : null;
+                    }
+                """) or "").strip()
+            except Exception:
+                desc = ""
+
+        if desc and len(desc) > 200:
+            return desc[:8000]
+
         # Expand "Show more" / "more" / "Read full description" accordions
+        # (generic company career sites where truncation actually removes DOM text)
         for more_sel in [
             "button.show-more-less-html__button--more",
             "button[aria-label='Click to see more description']",
@@ -322,9 +349,8 @@ def fetch_job_description(page, url):
                 pass
 
         # Extract job description — LinkedIn selectors first, then generic fallbacks
-        desc = ""
         for selector in [
-            # LinkedIn "About the job" section
+            # LinkedIn "About the job" section (classic layout)
             ".jobs-description__content",
             ".jobs-box__html-content",
             ".description__text",
@@ -545,39 +571,48 @@ Return ONLY a JSON object. No markdown. No extra text. No explanation.
   ]
 }}"""
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=6000,
-        system=[{"type": "text", "text": BACKGROUND_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "This is Dom's existing resume. Use the bullet points and wording from this document as your source of truth. Reorder bullets to lead with the most relevant signal for this role. Reframe where needed for the JD. Do not invent new bullets, do not expand existing bullets beyond what is written here, and do not add claims that are not already present in this document.",
-                },
-                resume_content_block,
-                {
-                    "type": "text",
-                    "text": text_prompt,
-                },
-            ],
-        }]
-    )
-    usage = response.usage
-    if getattr(usage, "cache_read_input_tokens", 0):
-        print(f"      [cache] {usage.cache_read_input_tokens:,} tokens read from cache")
+    messages = [{
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "This is Dom's existing resume. Use the bullet points and wording from this document as your source of truth. Reorder bullets to lead with the most relevant signal for this role. Reframe where needed for the JD. Do not invent new bullets, do not expand existing bullets beyond what is written here, and do not add claims that are not already present in this document.",
+            },
+            resume_content_block,
+            {
+                "type": "text",
+                "text": text_prompt,
+            },
+        ],
+    }]
 
-    raw = response.content[0].text.strip()
-    raw = re.sub(r'^```json\s*', '', raw)
-    raw = re.sub(r'^```\s*',     '', raw)
-    raw = re.sub(r'\s*```$',     '', raw)
+    # An empty/unparseable response has been observed intermittently (no
+    # content, stop_reason not "end_turn") — retry once before giving up,
+    # logging enough about the response to diagnose it if it keeps happening.
+    for attempt in range(2):
+        response = client.messages.create(
+            model=model,
+            max_tokens=6000,
+            system=[{"type": "text", "text": BACKGROUND_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=messages,
+        )
+        usage = response.usage
+        if getattr(usage, "cache_read_input_tokens", 0):
+            print(f"      [cache] {usage.cache_read_input_tokens:,} tokens read from cache")
 
-    try:
-        return json.loads(raw)
-    except Exception as e:
-        print(f"   ⚠️  Could not parse resume JSON: {e}")
-        return None
+        raw = response.content[0].text.strip() if response.content else ""
+        raw = re.sub(r'^```json\s*', '', raw)
+        raw = re.sub(r'^```\s*',     '', raw)
+        raw = re.sub(r'\s*```$',     '', raw)
+
+        try:
+            return json.loads(raw)
+        except Exception as e:
+            block_types = [getattr(b, "type", "?") for b in response.content]
+            print(f"   ⚠️  Could not parse resume JSON (attempt {attempt + 1}/2): {e} "
+                  f"| stop_reason={response.stop_reason} | content_blocks={block_types}")
+
+    return None
 
 
 def build_docx(resume_data, output_path):
@@ -840,9 +875,11 @@ def run_pipeline(jobs, test_scoring_only=False):
             print(f"[{i}/{len(jobs)}]  {title} @ {company}")
 
             # 1. Fetch job description
-            #    Primary:    apply URL (always the authoritative source)
-            #    Fallback 1: pre-scraped listing text (BuiltIn "The Role")
-            #    Fallback 2: listing page URL (LinkedIn "About the job" / BuiltIn page)
+            #    Primary:    apply URL (external apply link always takes precedence;
+            #                for Easy Apply jobs this URL is the LinkedIn listing itself)
+            #    Fallback 1: listing page URL (LinkedIn "About the job" / BuiltIn page) —
+            #                also the effective source for Easy Apply jobs above
+            #    Fallback 2: pre-scraped listing text (BuiltIn "The Role") — last resort
             #    No JD:      log to Applications and skip — don't create an application
             print("      Fetching job description...")
             jd = ""
@@ -852,16 +889,16 @@ def run_pipeline(jobs, test_scoring_only=False):
                 if jd:
                     print(f"      Got description from apply URL ({len(jd)} chars)")
 
+            if not jd and linkedin_url and linkedin_url != url:
+                jd = fetch_job_description(page, linkedin_url)
+                if jd:
+                    print(f"      Got description from listing page ({len(jd)} chars)")
+
             if not jd:
                 scraped_desc = job.get("description", "")
                 if scraped_desc and len(scraped_desc) > 200:
                     jd = scraped_desc
                     print(f"      Using pre-scraped listing description ({len(jd)} chars)")
-
-            if not jd and linkedin_url and linkedin_url != url:
-                jd = fetch_job_description(page, linkedin_url)
-                if jd:
-                    print(f"      Got description from listing page ({len(jd)} chars)")
 
             if not jd:
                 print("      Could not fetch job description by any means — logging and skipping")
