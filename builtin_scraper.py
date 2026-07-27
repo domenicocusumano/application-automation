@@ -242,7 +242,22 @@ async def scrape_job_detail(page, job_url: str) -> dict:
     }
     try:
         await page.goto(job_url, wait_until="domcontentloaded", timeout=DETAIL_TIMEOUT)
-        await page.wait_for_timeout(1000)
+
+        # BuiltIn renders the company name and apply button via Alpine.js
+        # (x-if templates) that clone content into the DOM only after the JS
+        # bundle hydrates — they don't exist yet at "domcontentloaded". A
+        # flat 1s sleep isn't reliably long enough under real network/CPU
+        # load, which was silently producing blank company + apply_url
+        # falling back to the BuiltIn listing URL. Wait for either apply
+        # flow's markup (external redirect button or native Easy Apply
+        # button) to actually appear before scraping starts.
+        try:
+            await page.wait_for_selector(
+                "a#applyButton, [aria-label='Easy Apply to job']", timeout=8000
+            )
+        except PWTimeout:
+            pass
+        await page.wait_for_timeout(500)
 
         # Company name: h2 in the job card header is the most reliable on BuiltIn,
         # followed by breadcrumb first-link, then various data-testid/class selectors.
@@ -440,6 +455,13 @@ async def scrape_job_detail(page, job_url: str) -> dict:
         # Otherwise, try to find the external company apply link.
         if not result["easy_apply"]:
             for sel in [
+                # BuiltIn's real external-apply button is consistently
+                # <a id="applyButton" aria-label="Apply to job" href="...">;
+                # the native Easy Apply button never has this id/aria-label
+                # (it's aria-label="Easy Apply to job" with no id). Checked
+                # live across Workday/Workable/Greenhouse/appcast postings.
+                "a#applyButton[href]",
+                "a[aria-label='Apply to job'][href]",
                 "a[data-testid='apply-button'][href]",
                 "a[href*='apply'][target='_blank']",
                 "a:has-text('Apply Now')[href]",
