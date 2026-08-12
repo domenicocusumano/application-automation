@@ -586,10 +586,17 @@ Return ONLY a JSON object. No markdown. No extra text. No explanation.
         ],
     }]
 
-    # An empty/unparseable response has been observed intermittently (no
-    # content, stop_reason not "end_turn") — retry once before giving up,
-    # logging enough about the response to diagnose it if it keeps happening.
-    for attempt in range(2):
+    # An unparseable response has been observed intermittently. The parse
+    # error alone ("Expecting value: line 1 column 1 (char 0)") is what
+    # json.loads raises for ANY string that doesn't start with valid JSON —
+    # not just an empty one — so previously logging only the exception gave
+    # no way to tell whether the response was truly empty, had a code-fence
+    # variant our old regex missed, or had prose before/after the JSON.
+    # Now: log the actual raw text on failure, and parse with raw_decode()
+    # starting at the first '{' so leading/trailing prose around a valid
+    # JSON object no longer fails the whole parse.
+    last_raw = ""
+    for attempt in range(3):
         response = client.messages.create(
             model=model,
             max_tokens=6000,
@@ -601,17 +608,24 @@ Return ONLY a JSON object. No markdown. No extra text. No explanation.
             print(f"      [cache] {usage.cache_read_input_tokens:,} tokens read from cache")
 
         raw = response.content[0].text.strip() if response.content else ""
-        raw = re.sub(r'^```json\s*', '', raw)
-        raw = re.sub(r'^```\s*',     '', raw)
-        raw = re.sub(r'\s*```$',     '', raw)
+        last_raw = raw
+        brace_idx = raw.find("{")
+
+        if brace_idx == -1:
+            print(f"   ⚠️  Resume response had no '{{' (attempt {attempt + 1}/3) "
+                  f"| stop_reason={response.stop_reason} | len={len(raw)} chars "
+                  f"| text={raw[:300]!r}")
+            continue
 
         try:
-            return json.loads(raw)
+            data, _ = json.JSONDecoder().raw_decode(raw, brace_idx)
+            return data
         except Exception as e:
-            block_types = [getattr(b, "type", "?") for b in response.content]
-            print(f"   ⚠️  Could not parse resume JSON (attempt {attempt + 1}/2): {e} "
-                  f"| stop_reason={response.stop_reason} | content_blocks={block_types}")
+            print(f"   ⚠️  Could not parse resume JSON (attempt {attempt + 1}/3): {e} "
+                  f"| stop_reason={response.stop_reason} | len={len(raw)} chars "
+                  f"| text={raw[:300]!r}")
 
+    print(f"   ⚠️  Giving up on resume JSON after 3 attempts. Last raw response (first 1500 chars):\n{last_raw[:1500]!r}")
     return None
 
 
