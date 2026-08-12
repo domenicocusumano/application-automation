@@ -231,6 +231,63 @@ def already_applied(job: dict, applied_pairs: set, applied_urls: set) -> bool:
 
 # ── DETAIL PAGE ────────────────────────────────────────────────────────────────
 
+def _extract_job_post_init(html: str) -> Optional[dict]:
+    """
+    Pull the authoritative job payload out of a Built-in detail page.
+
+    Every Built-in job page server-renders a bootstrap call:
+
+        Builtin.jobPostInit({"job":{"id":9099544,
+                                    "howToApply":"https://jobs.ashbyhq.com/atob/7e6b...",
+                                    "companyName":"AtoB",
+                                    "title":"Senior Product Manager",
+                                    "isEasyApply":false, ...}, ...})
+
+    `howToApply` is the real external apply destination — the same URL the
+    Apply button sends a logged-in user to. It is present in the raw HTML
+    (no JS execution, no login required), which is why this is the primary
+    source instead of any DOM selector. See the comment in scrape_job_detail
+    for why the DOM-based approaches kept failing.
+
+    Returns the inner "job" dict, or None if the payload isn't present.
+    """
+    marker = re.search(r"Builtin\.jobPostInit\(\s*\{", html)
+    if not marker:
+        return None
+
+    # Brace-match from the opening "{" so nested objects/strings survive.
+    start = html.index("{", marker.start())
+    depth, in_str, escaped, end = 0, False, False, -1
+    for i in range(start, len(html)):
+        c = html[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif c == "\\":
+                escaped = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end == -1:
+        return None
+
+    try:
+        payload = json.loads(html[start:end])
+    except json.JSONDecodeError:
+        return None
+
+    job = payload.get("job")
+    return job if isinstance(job, dict) else None
+
+
 async def scrape_job_detail(page, job_url: str) -> dict:
     """
     Fetch company, location, job description, Easy Apply status, and actual apply URL
@@ -240,8 +297,55 @@ async def scrape_job_detail(page, job_url: str) -> dict:
         "company": "", "location": "", "description": "",
         "easy_apply": False, "apply_url": job_url,
     }
+    # True once the apply URL / Easy Apply flag come from the embedded
+    # jobPostInit payload, which outranks every DOM heuristic below.
+    trusted_apply = False
     try:
         await page.goto(job_url, wait_until="domcontentloaded", timeout=DETAIL_TIMEOUT)
+
+        # ── Authoritative source: the embedded jobPostInit payload ──
+        # This runs BEFORE any DOM scraping and, when present, settles
+        # company / easy_apply / apply_url outright.
+        #
+        # Why this exists (the bug that kept coming back): the scraper
+        # browses Built-in logged OUT. For a logged-out visitor Built-in
+        # never renders the external apply anchor at all — the sticky bar
+        # renders "Log In to apply" / "Sign up" links instead. So
+        # `a#applyButton`, `a[aria-label='Apply to job']`, `a:has-text('Apply')`
+        # and friends match nothing (or match the login link), every fallback
+        # falls through, and apply_url silently keeps its `job_url` default —
+        # which is exactly how the Built-in listing URL ended up in the sheet.
+        # No selector tweak can fix that, because the element being hunted for
+        # does not exist in the page the scraper is looking at. The URL is
+        # only ever in this JSON payload, which is server-rendered for
+        # everyone. Verified across Ashby/Greenhouse/Workday/Oracle/Dover
+        # postings, Easy Apply and not.
+        try:
+            job_data = _extract_job_post_init(await page.content())
+        except Exception:
+            job_data = None
+
+        if job_data:
+            company_name = (job_data.get("companyName") or "").strip()
+            if company_name:
+                result["company"] = company_name
+
+            result["easy_apply"] = bool(job_data.get("isEasyApply"))
+
+            how_to_apply = (job_data.get("howToApply") or "").strip()
+            if how_to_apply.startswith("//"):
+                how_to_apply = "https:" + how_to_apply
+            external = (
+                how_to_apply
+                if how_to_apply.startswith("http")
+                and "builtin.com" not in how_to_apply.lower()
+                else ""
+            )
+            # Easy Apply jobs deliberately keep the Built-in URL so the
+            # application filler drives Built-in's own apply flow.
+            if external and not result["easy_apply"]:
+                result["apply_url"] = external
+            trusted_apply = True
 
         # BuiltIn renders the company name and apply button via Alpine.js
         # (x-if templates) that clone content into the DOM only after the JS
@@ -261,7 +365,8 @@ async def scrape_job_detail(page, job_url: str) -> dict:
 
         # Company name: h2 in the job card header is the most reliable on BuiltIn,
         # followed by breadcrumb first-link, then various data-testid/class selectors.
-        for sel in [
+        # Skipped entirely when jobPostInit already supplied the name.
+        for sel in [] if result["company"] else [
             # BuiltIn renders company name as <a href="/company/..."><h2>Name</h2></a>
             # — the h2 is a direct child of the company anchor, NOT the other way around
             "a[href*='/company/'] > h2",
@@ -422,9 +527,12 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                     pass
 
         # ── Easy Apply detection ──
+        # Only runs when jobPostInit was unavailable — `isEasyApply` from the
+        # payload is exact, while these selectors can be tripped by the
+        # "Easy Apply" badges on the similar-jobs cards further down the page.
         # Check button/link elements directly — avoid scanning broad containers
         # (sticky divs can contain "Easy Apply" text in unrelated parts of the page)
-        for sel in [
+        for sel in [] if trusted_apply else [
             "button:has-text('Easy Apply')", "a:has-text('Easy Apply')",
             "[data-testid*='easy-apply']", ".easy-apply",
         ]:
@@ -436,7 +544,7 @@ async def scrape_job_detail(page, job_url: str) -> dict:
             except Exception:
                 pass
 
-        if not result["easy_apply"]:
+        if not trusted_apply and not result["easy_apply"]:
             try:
                 result["easy_apply"] = await page.evaluate("""() => {
                     // Only flag Easy Apply when a visible <a> or <button> has exactly
@@ -450,10 +558,12 @@ async def scrape_job_detail(page, job_url: str) -> dict:
             except Exception:
                 pass
 
-        # ── External apply URL ──
-        # If Easy Apply, the apply URL stays as the Built-in listing URL.
-        # Otherwise, try to find the external company apply link.
-        if not result["easy_apply"]:
+        # ── External apply URL (legacy DOM fallbacks) ──
+        # Only reached if jobPostInit was missing — e.g. Built-in changes the
+        # bootstrap call's name. If Easy Apply, the apply URL stays as the
+        # Built-in listing URL. Otherwise, try to find the external company
+        # apply link.
+        if not trusted_apply and not result["easy_apply"]:
             for sel in [
                 # BuiltIn's real external-apply button is consistently
                 # <a id="applyButton" aria-label="Apply to job" href="...">;
@@ -512,18 +622,36 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                         "[class*='apply-btn']", "[class*='ApplyBtn']",
                     ]:
                         btn = await page.query_selector(btn_sel)
-                        if btn and await btn.is_visible():
-                            async with page.context.expect_page(timeout=10000) as new_page_info:
-                                await btn.click()
-                            new_tab = await new_page_info.value
-                            await new_tab.wait_for_load_state("domcontentloaded", timeout=10000)
-                            external_url = new_tab.url
-                            await new_tab.close()
-                            if external_url and "builtin.com" not in external_url.lower():
-                                result["apply_url"] = external_url
-                                break
+                        if not btn or not await btn.is_visible():
+                            continue
+                        # Never click Built-in's own auth links. Logged out,
+                        # the sticky bar shows "Log In to apply" / "Sign up to
+                        # apply", both of which match a:has-text('Apply') and
+                        # navigate this tab away from the job page.
+                        btn_href = (await btn.get_attribute("href") or "").lower()
+                        btn_text = ((await btn.inner_text()) or "").lower()
+                        if "/auth/" in btn_href or "builtin.com/auth" in btn_href:
+                            continue
+                        if "log in" in btn_text or "sign up" in btn_text:
+                            continue
+
+                        async with page.context.expect_page(timeout=10000) as new_page_info:
+                            await btn.click()
+                        new_tab = await new_page_info.value
+                        await new_tab.wait_for_load_state("domcontentloaded", timeout=10000)
+                        external_url = new_tab.url
+                        await new_tab.close()
+                        if external_url and "builtin.com" not in external_url.lower():
+                            result["apply_url"] = external_url
+                            break
                 except Exception:
                     pass
+
+        # Loud, explicit failure signal. Previously this fell through silently
+        # and the Built-in listing URL was written to the sheet as if it were
+        # the real apply link.
+        if not result["easy_apply"] and result["apply_url"] == job_url:
+            log(f"    [warn] no external apply URL found — falling back to Built-in URL: {job_url}")
 
     except PWTimeout:
         log(f"    [timeout] {job_url}")
