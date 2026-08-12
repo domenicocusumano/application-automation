@@ -1205,6 +1205,7 @@ def main():
     print("LinkedIn Pipeline — Starting\n")
 
     linkedin_enabled     = cfg.get("linkedin_enabled", True)
+    builtin_enabled      = cfg.get("builtin_enabled", False)
     linkedin_search_term = cfg.get("linkedin_search_term", SEARCH_KEYWORDS).strip() or SEARCH_KEYWORDS
 
     # 1. Load already-applied jobs from Google Sheets
@@ -1220,9 +1221,16 @@ def main():
         )
 
     if not candidates:
-        print("No matching jobs found.")
-        print("If this is your first run, make sure you completed the LinkedIn login.")
-        print("If the session expired, delete linkedin_session.json and run again.")
+        if not linkedin_enabled and not builtin_enabled:
+            print("No matching jobs found — because no scraper is enabled.")
+            print("Go to Settings and turn on LinkedIn scraping and/or Built-in scraping, then run again.")
+        elif not linkedin_enabled:
+            print("No matching jobs found — LinkedIn scraping is disabled in Settings.")
+            print("Go to Settings and enable LinkedIn scraping, then run again.")
+        else:
+            print("No matching jobs found.")
+            print("If this is your first run, make sure you completed the LinkedIn login.")
+            print("If the session expired, delete linkedin_session.json and run again.")
         return
 
     # 3. Fetch actual apply URLs (only for the ~10 survivors)

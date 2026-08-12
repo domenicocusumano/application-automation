@@ -849,6 +849,8 @@
   }
 
   // ── CONFIG ─────────────────────────────────────────────────────────────────
+  let configLoaded = false;
+
   async function loadConfig() {
     try {
       const r = await fetch('/config');
@@ -883,6 +885,7 @@
       if (data.builtin_enabled) {
         document.getElementById('run-btn').disabled = false;
       }
+      configLoaded = true;
     } catch (e) {
       console.error('Failed to load config:', e);
     }
@@ -898,6 +901,13 @@
 
   async function saveConfig(statusId) {
     const statusEl = document.getElementById(statusId || 'status-settings');
+    if (!configLoaded) {
+      // Refuse to save until the on-disk config has actually been loaded into the
+      // form — otherwise we'd overwrite it with blank/default field values.
+      statusEl.textContent = 'Still loading settings — try again in a moment';
+      statusEl.className = 'save-status error';
+      return;
+    }
     const firstName          = document.getElementById('first-name-input').value.trim();
     const lastName           = document.getElementById('last-name-input').value.trim();
     const rawThreshold       = parseFloat(document.getElementById('threshold-input').value);
