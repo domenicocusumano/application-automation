@@ -7,6 +7,8 @@
   "linkedin_search_term": "Your Target Role",
   "builtin_enabled": false,
   "builtin_url": "https://builtin.com/jobs/remote?search=your+role&country=USA&allLocations=true",
+  "dynamite_enabled": false,
+  "dynamite_url": "https://dynamitejobs.com/remote-jobs?text=your+role",
   "title_keywords": [],
   "excluded_titles": [],
   "excluded_title_words": [],
@@ -25,10 +27,11 @@
     "your city"
   ],
   "salary_minimum": 0,
+  "max_candidates": 10,
   "google_sheet_url": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/",
   "gdrive_folder_id": "YOUR_GOOGLE_DRIVE_FOLDER_ID",
-  "scoring_model": "claude-sonnet-4-6",
-  "resume_model": "claude-sonnet-4-6",
+  "scoring_model": "claude-sonnet-5",
+  "resume_model": "claude-sonnet-5",
   "resume_output_format": "docx",
   "applicant": {
     "first_name": "Jane",

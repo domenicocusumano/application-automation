@@ -260,16 +260,18 @@ python3 job_scraper.py --resume  # scrape, rank, and immediately build resumes
 
 ### Built-in scraper — `builtin_scraper.py`
 
-Scrapes Built-in.com via a headless browser (no login required). The search is driven entirely by the **Built-in URL** you configure — build the URL by doing a search on builtin.com with your filters (role, location, remote, etc.) and paste the results page URL into Settings. Workflow per job:
+Scrapes Built-in.com via a headless browser. The search is driven entirely by the **Built-in URL** you configure — build the URL by doing a search on builtin.com with your filters (role, location, remote, etc.) and paste the results page URL into Settings. Workflow per job:
 
 1. Extracts title and location from the list page card (JS-evaluated to get the work model — Remote/Hybrid/In-office)
 2. Filters by title (using your configured role keywords and exclusions) and location
 3. **Pre-checks against the Google Sheet** by Built-in URL and numeric job ID — skips the detail page entirely if already applied
-4. Visits the detail page to extract: company, full job description, and the **actual external apply URL** (the button that takes you to the company's career site)
+4. Visits the detail page to extract: company, full job description, and the **actual external apply URL** (the button that takes you to the company's career site). Many postings now gate this URL behind a Built-in login — see below.
 5. Checks within-run fingerprint (company + title) to catch the same job appearing on multiple pages with different URLs
 6. Scores by seniority tier and adds to the candidate list
 
 After collecting up to 10 candidates, automatically calls `resume_pipeline.run_pipeline()`.
+
+**Built-in login (optional, recommended):** Built-in no longer exposes the real external apply URL for most postings to logged-out visitors — without a session, the scraper falls back to the Built-in listing URL for those jobs. Click **Re-login Built-in** in the web UI (or run `python3 relogin_builtin.py`) once to open a browser, log in, and save the session to `builtin_session.json`. Reused on every run; delete the file or click Re-login again if it expires.
 
 Runs standalone (and is the default when Built-in is enabled in the UI):
 ```bash
@@ -397,6 +399,7 @@ application-automation/
 ├── resume_pipeline.py          # Claude scorer + .docx builder + Drive uploader
 ├── application_filler.py       # Browser-based form filler + submitter
 ├── relogin.py                  # LinkedIn session re-authentication helper
+├── relogin_builtin.py          # Built-in session re-authentication helper
 │
 ├── background_prompt.txt       # Your resume context and scoring rules for Claude
 ├── config.json                 # All pipeline settings (managed via UI)
@@ -411,6 +414,7 @@ application-automation/
 ├── oauth_credentials.json      # Google OAuth desktop app credentials (git-ignored)
 ├── gdrive_token.json           # Auto-created Drive OAuth token (git-ignored)
 ├── linkedin_session.json       # Saved LinkedIn browser session (git-ignored)
+├── builtin_session.json        # Saved Built-in browser session (git-ignored)
 │
 ├── pipeline_output.json        # Written by the pipeline, read by the form filler
 │
@@ -429,8 +433,9 @@ application-automation/
 | `oauth_credentials.json` | Google OAuth client secret |
 | `gdrive_token.json` | Live Drive access token — grants upload access to your personal Drive |
 | `linkedin_session.json` | Saved browser cookies — anyone with this file can act as you on LinkedIn |
+| `builtin_session.json` | Saved browser cookies — anyone with this file can act as you on Built-in |
 
-All five are already in `.gitignore`. Verify before pushing:
+All six are already in `.gitignore`. Verify before pushing:
 ```bash
 git status --short | grep -E "\.env|credentials|token|session"
 ```
@@ -444,6 +449,9 @@ Delete `linkedin_session.json` and run `job_scraper.py` again, or click **Re-aut
 
 **No jobs found by the LinkedIn scraper**
 LinkedIn's DOM changes regularly. If no cards are being extracted, check `extract_job_from_card()` in `job_scraper.py` — the CSS selectors may need updating.
+
+**Built-in scraper keeps logging "requires a logged-in session to reveal this apply URL"**
+Delete `builtin_session.json` and click **Re-login Built-in** in the web UI (or run `python3 relogin_builtin.py`) to refresh the session. Without a valid session, Built-in only reveals the Built-in listing URL for postings that gate their real apply link behind an account — this is expected, not a scraper bug.
 
 **Built-in scraper finds 0 jobs**
 Check the `extract_jobs_from_page()` selector list in `builtin_scraper.py`. The `[selector]` log line shows which selector matched and how many links were found — if it shows 0, Built-in's markup has changed.

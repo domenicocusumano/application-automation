@@ -36,6 +36,18 @@ DRY_RUN            = True     # True = fill but do not submit (safe testing mode
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def _response_text(response) -> str:
+    """
+    Return the concatenated text from a Messages API response, skipping any
+    non-text blocks (e.g. ThinkingBlock). See the identical helper in
+    resume_pipeline.py for why response.content[0] can no longer be assumed
+    to be the text block on current-generation models.
+    """
+    return "".join(
+        block.text for block in (response.content or []) if block.type == "text"
+    )
+
 # ── STEALTH INIT SCRIPT ────────────────────────────────────────────────────────
 # Injected into every page context to suppress the automation signals that
 # Cloudflare, Greenhouse, and similar bot-detection systems check for.
@@ -192,7 +204,7 @@ Always apply these answers exactly — match the closest available option in the
         messages=[{"role": "user", "content": prompt}]
     )
 
-    raw = response.content[0].text.strip()
+    raw = _response_text(response).strip()
     # Strip markdown if present
     raw = re.sub(r'^```json\s*', '', raw)
     raw = re.sub(r'^```\s*', '', raw)
@@ -243,7 +255,7 @@ If ready is false, list the issues. Do not mark as ready if there are obvious pr
         messages=[{"role": "user", "content": prompt}]
     )
 
-    raw = response.content[0].text.strip()
+    raw = _response_text(response).strip()
     raw = re.sub(r'^```json\s*', '', raw)
     raw = re.sub(r'^```\s*', '', raw)
     raw = re.sub(r'\s*```$', '', raw)
@@ -707,7 +719,7 @@ No other text."""
         messages=[{"role": "user", "content": prompt}]
     )
 
-    raw = response.content[0].text.strip()
+    raw = _response_text(response).strip()
     raw = re.sub(r'^```json\s*', '', raw)
     raw = re.sub(r'^```\s*', '', raw)
     raw = re.sub(r'\s*```$', '', raw)

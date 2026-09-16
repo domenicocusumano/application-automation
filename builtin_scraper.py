@@ -17,20 +17,34 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Optional, List
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
 
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 load_dotenv()
 
-CONFIG_FILE    = Path(__file__).parent / "config.json"
+SCRIPT_DIR     = Path(__file__).parent
+CONFIG_FILE    = SCRIPT_DIR / "config.json"
+SESSION_FILE   = SCRIPT_DIR / "builtin_session.json"
 MAX_PAGES      = 20
 NAV_TIMEOUT    = 30_000
 DETAIL_TIMEOUT = 20_000
 MAX_CANDIDATES = 10
+
+# Built-in sits behind Cloudflare, which rate-limits by IP on request volume
+# (all subresources count, not just the document). Past ~8 detail pages
+# fetched back-to-back it starts answering with HTTP 429 and the "Just a
+# moment..." interstitial instead of the job page. DETAIL_PAUSE paces the
+# detail visits to stay under that ceiling; DETAIL_BACKOFF is the retry
+# schedule when we trip it anyway. Measured: the challenge does NOT solve
+# itself (still up after 30s of waiting), but a plain re-navigation ~10s
+# later comes back 200 with the real page.
+DETAIL_PAUSE    = 1.5
+DETAIL_BACKOFF  = (10, 20, 40)
 
 GOOGLE_CREDS_FILE = Path(__file__).parent / os.getenv("GOOGLE_CREDS_FILE", "google_credentials.json")
 
@@ -229,6 +243,27 @@ def already_applied(job: dict, applied_pairs: set, applied_urls: set) -> bool:
     return False
 
 
+def check_builtin_session():
+    """
+    Checks the saved Built-in session by inspecting cookies for the builtin.com
+    domain. Mirrors job_scraper.check_linkedin_session() — no HTTP request,
+    just a local expiry check. Returns (valid: bool, reason: str).
+    """
+    if not SESSION_FILE.exists():
+        return False, "No session file found"
+    try:
+        data = json.loads(SESSION_FILE.read_text())
+        cookies = [c for c in data.get("cookies", []) if "builtin.com" in c.get("domain", "")]
+        if not cookies:
+            return False, "No builtin.com cookies — please re-login"
+        now = time.time()
+        if all(c.get("expires", -1) != -1 and c["expires"] < now for c in cookies):
+            return False, "Session cookies expired — please re-login"
+        return True, "Session active"
+    except Exception as e:
+        return False, f"Could not read session file: {e}"
+
+
 # ── DETAIL PAGE ────────────────────────────────────────────────────────────────
 
 def _extract_job_post_init(html: str) -> Optional[dict]:
@@ -288,6 +323,92 @@ def _extract_job_post_init(html: str) -> Optional[dict]:
     return job if isinstance(job, dict) else None
 
 
+# Ad-click wrappers Built-in routes some apply links through. The real
+# destination is appended after the tracker's own query separator, e.g.
+#   https://ad.doubleclick.net/ddm/clk/628601142;435308584;f?https://www.example.com/job/1
+_AD_REDIRECT_HOSTS = (
+    "ad.doubleclick.net", "adclick.g.doubleclick.net", "googleads.g.doubleclick.net",
+)
+
+
+def _external_apply_url(raw: str, base: str = "") -> str:
+    """
+    Normalise an apply link and return it only if it actually leaves Built-in.
+
+    Returns "" for empty/relative-to-Built-in/on-site links.
+
+    Host is compared by *hostname*, never by substring: Built-in appends its
+    own attribution params to outbound links, so a perfectly good external URL
+    can carry "utm_source=builtin.com" in its query string. The old substring
+    check rejected those, which silently dropped the apply URL and left the
+    Built-in listing URL in the sheet.
+    """
+    url = (raw or "").strip()
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = "https:" + url
+    elif url.startswith("/") and base:
+        url = urljoin(base, url)
+    if not url.startswith("http"):
+        return ""
+
+    host = (urlparse(url).hostname or "").lower()
+
+    # Unwrap ad-click trackers so the sheet gets the employer's real ATS link
+    # rather than a tracker that may expire or be blocked.
+    if host in _AD_REDIRECT_HOSTS and "?" in url:
+        inner = url.split("?", 1)[1]
+        if inner.startswith("http://") or inner.startswith("https://"):
+            url = inner
+            host = (urlparse(url).hostname or "").lower()
+
+    if host == "builtin.com" or host.endswith(".builtin.com"):
+        return ""
+    return url
+
+
+async def _is_rate_limited(page, response) -> bool:
+    """
+    True when Cloudflare answered with its challenge page instead of the job
+    page. Three independent tells, because only the first is present on a
+    hard 429 and only the last survives a client-side challenge redirect:
+      - 429/403/503 status on the document response
+      - "__cf_chl" query param Cloudflare appends when it bounces the request
+      - "Just a moment..." <title> on the interstitial itself
+    """
+    if response is not None and response.status in (403, 429, 503):
+        return True
+    if "__cf_chl" in page.url:
+        return True
+    try:
+        return (await page.title()).strip().lower().startswith("just a moment")
+    except Exception:
+        return False
+
+
+async def _goto_detail(page, job_url: str) -> bool:
+    """
+    Navigate to a job detail page, retrying through Cloudflare rate limits.
+
+    Returns True once the real page is loaded, False if every attempt came
+    back challenged. Callers must treat False as "no data" — scraping the
+    interstitial yields a blank company and no apply URL, which is exactly
+    how blank Company cells and Built-in listing URLs ended up in the sheet.
+    """
+    response = await page.goto(job_url, wait_until="domcontentloaded", timeout=DETAIL_TIMEOUT)
+    if not await _is_rate_limited(page, response):
+        return True
+
+    for delay in DETAIL_BACKOFF:
+        log(f"    [rate-limited] Cloudflare challenge — backing off {delay}s and retrying")
+        await asyncio.sleep(delay)
+        response = await page.goto(job_url, wait_until="domcontentloaded", timeout=DETAIL_TIMEOUT)
+        if not await _is_rate_limited(page, response):
+            return True
+    return False
+
+
 async def scrape_job_detail(page, job_url: str) -> dict:
     """
     Fetch company, location, job description, Easy Apply status, and actual apply URL
@@ -295,13 +416,17 @@ async def scrape_job_detail(page, job_url: str) -> dict:
     """
     result = {
         "company": "", "location": "", "description": "",
-        "easy_apply": False, "apply_url": job_url,
+        "easy_apply": False, "apply_url": job_url, "login_required": False,
+        "blocked": False,
     }
     # True once the apply URL / Easy Apply flag come from the embedded
     # jobPostInit payload, which outranks every DOM heuristic below.
     trusted_apply = False
     try:
-        await page.goto(job_url, wait_until="domcontentloaded", timeout=DETAIL_TIMEOUT)
+        if not await _goto_detail(page, job_url):
+            result["blocked"] = True
+            log(f"    [blocked] Cloudflare kept challenging {job_url} — skipping this job")
+            return result
 
         # ── Authoritative source: the embedded jobPostInit payload ──
         # This runs BEFORE any DOM scraping and, when present, settles
@@ -320,6 +445,11 @@ async def scrape_job_detail(page, job_url: str) -> dict:
         # only ever in this JSON payload, which is server-rendered for
         # everyone. Verified across Ashby/Greenhouse/Workday/Oracle/Dover
         # postings, Easy Apply and not.
+        #
+        # Newer postings drop `howToApply` from the payload entirely and only
+        # supply `applyUrl`, a same-site "/job/...?handler=ApplyRedirect" path.
+        # Logged out, that handler 302s to "?applyRequired=true" (a login
+        # wall) instead of the company site — see the applyUrl handling below.
         try:
             job_data = _extract_job_post_init(await page.content())
         except Exception:
@@ -332,15 +462,46 @@ async def scrape_job_detail(page, job_url: str) -> dict:
 
             result["easy_apply"] = bool(job_data.get("isEasyApply"))
 
-            how_to_apply = (job_data.get("howToApply") or "").strip()
-            if how_to_apply.startswith("//"):
-                how_to_apply = "https:" + how_to_apply
-            external = (
-                how_to_apply
-                if how_to_apply.startswith("http")
-                and "builtin.com" not in how_to_apply.lower()
-                else ""
-            )
+            external = _external_apply_url(job_data.get("howToApply") or "")
+
+            # No howToApply — try the applyUrl redirect handler instead. Follow
+            # it through the browser context's request API (shares the loaded
+            # builtin_session.json cookies, if any) rather than navigating the
+            # page, so the JD/company scraping below is unaffected either way.
+            if not external and not result["easy_apply"]:
+                apply_path = (job_data.get("applyUrl") or "").strip()
+                if apply_path:
+                    redirect_url = urljoin(job_url, apply_path)
+                    # This hit counts against the same Cloudflare rate limit as
+                    # the page load, and a challenged response carries no
+                    # Location header at all — indistinguishable from "no apply
+                    # URL" unless we check the status. Retry on the same backoff
+                    # schedule as the detail navigation.
+                    for attempt, delay in enumerate((0,) + DETAIL_BACKOFF):
+                        if delay:
+                            log(f"    [rate-limited] apply redirect challenged — backing off {delay}s and retrying")
+                            await asyncio.sleep(delay)
+                        try:
+                            resp = await page.context.request.get(
+                                redirect_url, max_redirects=0, timeout=10_000
+                            )
+                        except Exception:
+                            break
+                        if resp.status in (403, 429, 503):
+                            continue
+
+                        location = resp.headers.get("location", "")
+                        resolved = _external_apply_url(location, job_url)
+                        if resolved:
+                            external = resolved
+                        elif "applyrequired" in location.lower():
+                            # Built-in only reveals this job's real apply URL to a
+                            # logged-in account — without a valid session there's
+                            # nothing more to try (the DOM fallback below won't
+                            # find anything either; see comment above).
+                            result["login_required"] = True
+                        break
+
             # Easy Apply jobs deliberately keep the Built-in URL so the
             # application filler drives Built-in's own apply flow.
             if external and not result["easy_apply"]:
@@ -583,8 +744,8 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                 try:
                     el = await page.query_selector(sel)
                     if el:
-                        href = (await el.get_attribute("href") or "").strip()
-                        if href and href.startswith("http") and "builtin.com" not in href.lower():
+                        href = _external_apply_url(await el.get_attribute("href") or "", job_url)
+                        if href:
                             result["apply_url"] = href
                             break
                 except Exception:
@@ -641,7 +802,8 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                         await new_tab.wait_for_load_state("domcontentloaded", timeout=10000)
                         external_url = new_tab.url
                         await new_tab.close()
-                        if external_url and "builtin.com" not in external_url.lower():
+                        external_url = _external_apply_url(external_url, job_url)
+                        if external_url:
                             result["apply_url"] = external_url
                             break
                 except Exception:
@@ -651,7 +813,10 @@ async def scrape_job_detail(page, job_url: str) -> dict:
         # and the Built-in listing URL was written to the sheet as if it were
         # the real apply link.
         if not result["easy_apply"] and result["apply_url"] == job_url:
-            log(f"    [warn] no external apply URL found — falling back to Built-in URL: {job_url}")
+            if result["login_required"]:
+                log(f"    [warn] Built-in requires a logged-in session to reveal this apply URL — falling back to Built-in URL: {job_url}")
+            else:
+                log(f"    [warn] no external apply URL found — falling back to Built-in URL: {job_url}")
 
     except PWTimeout:
         log(f"    [timeout] {job_url}")
@@ -796,6 +961,7 @@ async def find_next_url(list_page, page_num: int, current_url: str) -> Optional[
 async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
     candidates: List[dict] = []
     seen_urls: set         = set()
+    visited_detail         = 0  # detail pages hit this run — drives DETAIL_PAUSE pacing
     seen_fingerprints: set = set()  # (company.lower(), title.lower()) — within-run dedup
 
     preferred_locs  = config.get("preferred_locations",   ["remote", "miami"])
@@ -803,6 +969,7 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
     title_keywords  = [k.lower() for k in config.get("title_keywords",       _DEFAULT_TITLE_KEYWORDS)]
     excl_titles     = [k.lower() for k in config.get("excluded_titles",      list(_DEFAULT_EXCLUDED_TITLES))]
     excl_words      = [k.lower() for k in config.get("excluded_title_words", list(_DEFAULT_EXCLUDED_TITLE_WORDS))]
+    max_candidates  = int(config.get("max_candidates") or MAX_CANDIDATES)
 
     log(f"[Pipeline Settings — applied to all scrapers]")
     log(f"  Preferred locations : {preferred_locs}")
@@ -810,15 +977,22 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
     log(f"  Title keywords      : {title_keywords}")
     log(f"  Scoring             : programmatic (no Claude)")
     log(f"  Already-applied     : checked against Applications + Skips tabs\n")
-    log(f"[Built-in] Starting — target: {MAX_CANDIDATES} candidates")
+    log(f"[Built-in] Starting — target: {max_candidates} candidates")
     log(f"[Built-in] URL: {start_url}\n")
 
     # Load already-applied jobs before starting the browser
     applied_pairs, applied_urls = load_applied_jobs()
 
+    if SESSION_FILE.exists():
+        log("[Built-in] Reusing saved Built-in session...")
+    else:
+        log("[Built-in] No saved session — apply URLs gated behind a Built-in "
+            "login will fall back to the Built-in listing URL. Use the "
+            "'Re-login Built-in' button to fix this.")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
+        context_kwargs = dict(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -826,13 +1000,29 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
             ),
             viewport={"width": 1280, "height": 900},
         )
+        if SESSION_FILE.exists():
+            context_kwargs["storage_state"] = str(SESSION_FILE)
+        context = await browser.new_context(**context_kwargs)
+
+        # Cloudflare's rate limit counts every request, not just documents, and
+        # a Built-in job page pulls a long tail of images/fonts/tracking pixels
+        # we never read. Dropping them keeps far more headroom under the limit
+        # (stylesheets stay, so is_visible() checks still see real layout).
+        async def _block_heavy_assets(route):
+            if route.request.resource_type in ("image", "font", "media"):
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await context.route("**/*", _block_heavy_assets)
+
         list_page   = await context.new_page()
         detail_page = await context.new_page()
 
         current_url = start_url
         page_num    = 1
 
-        while page_num <= MAX_PAGES and len(candidates) < MAX_CANDIDATES:
+        while page_num <= MAX_PAGES and len(candidates) < max_candidates:
             log(f"[Built-in] ── Page {page_num} ──────────────────────────────────────")
             log(f"[Built-in] {current_url}")
 
@@ -852,9 +1042,10 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
             bad_location = 0
             already_app  = 0
             dup          = 0
+            blocked      = 0
 
             for job in page_jobs:
-                if len(candidates) >= MAX_CANDIDATES:
+                if len(candidates) >= max_candidates:
                     break
 
                 title = job["title"]
@@ -888,8 +1079,23 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
                     bad_location += 1
                     continue
 
-                # Title (and list-page location) passed — visit detail page
+                # Title (and list-page location) passed — visit detail page.
+                # Pace the visits: Cloudflare rate-limits on request volume and
+                # answers with a challenge page once we go too fast (see
+                # DETAIL_PAUSE).
+                if visited_detail:
+                    await asyncio.sleep(DETAIL_PAUSE)
+                visited_detail += 1
+
                 detail = await scrape_job_detail(detail_page, url)
+
+                # Challenged on every attempt — the page we saw was Cloudflare's
+                # interstitial, not the job. Its company/apply URL would both be
+                # wrong, so drop the job rather than log a bad row.
+                if detail["blocked"]:
+                    blocked += 1
+                    continue
+
                 job["company"]     = detail["company"]
                 job["description"] = detail["description"]
                 job["easy_apply"]  = detail["easy_apply"]
@@ -925,11 +1131,12 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
             log(
                 f"\n  Kept {kept} | Not PM: {not_pm} | Excluded: {excluded} "
                 f"| Bad location: {bad_location} | Already applied: {already_app} | Dup: {dup}"
+                f"{f' | Rate-limited: {blocked}' if blocked else ''}"
             )
-            log(f"  Candidates so far: {len(candidates)} / {MAX_CANDIDATES}")
+            log(f"  Candidates so far: {len(candidates)} / {max_candidates}")
 
-            if len(candidates) >= MAX_CANDIDATES:
-                log(f"\n[Built-in] Reached {MAX_CANDIDATES} candidates — done scraping.")
+            if len(candidates) >= max_candidates:
+                log(f"\n[Built-in] Reached {max_candidates} candidates — done scraping.")
                 break
 
             next_url = await find_next_url(list_page, page_num, current_url)
@@ -948,7 +1155,7 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
 
     # ── Summary ────────────────────────────────────────────────────────────────
     log(f"\n[Built-in] {'═' * 52}")
-    log(f"[Built-in] Candidates collected: {len(candidates)} / {MAX_CANDIDATES}")
+    log(f"[Built-in] Candidates collected: {len(candidates)} / {max_candidates}")
 
     if candidates:
         log("\n[Built-in] Candidate list (sorted by seniority score):")
