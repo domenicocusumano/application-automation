@@ -13,6 +13,7 @@ USAGE:
   python3 job_scraper.py --resume         # integrated: scraper feeds into pipeline
 """
 
+import math
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*urllib3.*")
@@ -25,6 +26,8 @@ import base64
 import subprocess
 import tempfile
 import anthropic
+from pathlib import Path
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 from playwright.sync_api import sync_playwright
@@ -55,6 +58,45 @@ SCRIPT_DIR          = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE         = os.path.join(SCRIPT_DIR, "config.json")
 
 
+def _response_text(response) -> str:
+    """
+    Return the concatenated text from a Messages API response, skipping any
+    non-text blocks (e.g. ThinkingBlock).
+
+    Claude Sonnet 5 and Opus 5 run adaptive thinking by default when
+    `thinking` is omitted from the request — unlike Sonnet 4.6/Opus 4.8,
+    where thinking stayed off unless explicitly enabled. That moved the
+    thinking block to content[0] and pushed the text block to content[1],
+    so every `response.content[0].text` in this codebase started raising
+    AttributeError on ThinkingBlock. Always locate the text block by type.
+    """
+    return "".join(
+        block.text for block in (response.content or []) if block.type == "text"
+    )
+
+
+# Models that accept `thinking: {"type": "adaptive"}` + `output_config.effort`.
+# Haiku 4.5 (this project's default scoring_model) and other pre-4.6 models
+# reject the adaptive form outright with a 400 ("adaptive thinking is not
+# supported on this model") — they take the older enabled/budget_tokens shape
+# or no thinking config at all. Settings lets either scoring_model or
+# resume_model be swapped independently, so both call sites must check the
+# model actually in use rather than assume the project default.
+_ADAPTIVE_THINKING_MODELS = (
+    "claude-sonnet-5", "claude-opus-5",
+    "claude-fable-5", "claude-mythos-5",
+    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
+    "claude-sonnet-4-6",
+)
+
+
+def _adaptive_thinking_kwargs(model: str) -> dict:
+    """kwargs to add adaptive thinking capped at a given effort, or {} if unsupported."""
+    if any(model.startswith(prefix) for prefix in _ADAPTIVE_THINKING_MODELS):
+        return {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}}
+    return {}
+
+
 def _load_pipeline_config():
     """Reads scoring/filter settings and applicant info from config.json."""
     defaults = {
@@ -64,8 +106,8 @@ def _load_pipeline_config():
         "salary_minimum":      0,
         "preferred_locations": ["remote"],
         "gdrive_folder_id":    "",
-        "scoring_model":        "claude-sonnet-4-6",
-        "resume_model":         "claude-sonnet-4-6",
+        "scoring_model":        "claude-sonnet-5",
+        "resume_model":         "claude-sonnet-5",
         "resume_output_format": "docx",
     }
     try:
@@ -113,6 +155,19 @@ def _get_sheet_id() -> str:
 
 
 SHEET_ID = _get_sheet_id()
+_SHEET_GID_CACHE: dict = {}  # tab name -> numeric sheetId, memoized per process
+
+
+def _get_sheet_gid(service, tab_name: str) -> int:
+    """Numeric sheetId for a tab name — needed for batchUpdate (cell formatting),
+    which addresses sheets by gid, not name. Cached: this only changes if a tab
+    is renamed/recreated mid-run, which doesn't happen in normal use."""
+    if tab_name not in _SHEET_GID_CACHE:
+        meta = service.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
+        for sheet in meta["sheets"]:
+            props = sheet["properties"]
+            _SHEET_GID_CACHE[props["title"]] = props["sheetId"]
+    return _SHEET_GID_CACHE[tab_name]
 
 
 def get_drive_service():
@@ -164,12 +219,105 @@ def get_sheets_service():
     return build("sheets", "v4", credentials=creds)
 
 
-def log_job_to_sheet(job, score, assessment, tab_name="Applications", drive_link=None):
+def normalize_url(url: str) -> str:
+    if not url:
+        return ""
+    url = str(url).strip().lower()
+    url = re.sub(r'#.*$', '', url)
+    url = re.sub(r'\?.*$', '', url)
+    url = url.rstrip('/')
+    url = re.sub(r'^(https?://)www\.', r'\1', url)
+    return url
+
+
+def _builtin_job_id(url: str) -> str:
+    """Extract numeric ID from a Built-in URL: /job/some-slug/12345 → '12345'. Returns '' if not found."""
+    m = re.search(r'builtin\.com/job/[^/?#]+/(\d+)', (url or "").lower())
+    return m.group(1) if m else ""
+
+
+def load_applied_from_sheet(service):
+    """
+    Reads the Applications + Skips tabs fresh from the Sheet and returns
+    (applied_pairs, applied_urls) — used to dedup right before scoring/building,
+    independent of whatever snapshot the calling scraper used.
+    """
+    applied_pairs: set = set()
+    applied_urls: set  = set()
+
+    for tab_name in ["Applications", "Skips"]:
+        try:
+            response = service.spreadsheets().values().get(
+                spreadsheetId=SHEET_ID,
+                range=f"{tab_name}!A:ZZ",
+            ).execute()
+            all_values = response.get("values", [])
+            if not all_values:
+                continue
+
+            headers = [h.strip() for h in all_values[0]]
+            for row_vals in all_values[1:]:
+                while len(row_vals) < len(headers):
+                    row_vals.append("")
+                if not any(v.strip() for v in row_vals):
+                    continue
+                row = {headers[i]: row_vals[i] for i in range(len(headers))}
+
+                company = str(row.get("Company", "")).strip().lower()
+                title   = str(row.get("Position Title", "")).strip().lower()
+                if company or title:
+                    applied_pairs.add((company, title))
+
+                for col in ["URL", "Linked In URL"]:
+                    val  = row.get(col, "")
+                    norm = normalize_url(val)
+                    if norm and norm.startswith("http"):
+                        applied_urls.add(norm)
+                    bid = _builtin_job_id(val)
+                    if bid:
+                        applied_urls.add(f"builtin-id:{bid}")
+        except Exception as e:
+            print(f"      Could not load {tab_name} tab for dedup check: {e}")
+
+    return applied_pairs, applied_urls
+
+
+def is_already_logged(job: dict, applied_pairs: set, applied_urls: set) -> bool:
+    """Returns True if this job's URL or Linked In URL already appears in the sheet."""
+    for field in ["url", "linkedin_url"]:
+        val  = job.get(field, "")
+        norm = normalize_url(val)
+        if norm and norm in applied_urls:
+            return True
+        bid = _builtin_job_id(val)
+        if bid and f"builtin-id:{bid}" in applied_urls:
+            return True
+
+    company = job.get("company", "").lower().strip()
+    title   = job.get("title", "").lower().strip()
+    return (company, title) in applied_pairs
+
+
+def _col_letter(index: int) -> str:
+    """0-based column index -> spreadsheet column letter (0 -> A, 25 -> Z, 26 -> AA, ...)."""
+    letters = ""
+    index += 1
+    while index > 0:
+        index, rem = divmod(index - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def log_job_to_sheet(job, score, assessment, tab_name="Applications", drive_link=None, bold_company=False):
     """
     Logs a job to the specified Google Sheet tab.
     Reads the header row to find correct column indices, so it's robust to column reordering.
     Fills: Company, Position Title, URL, Linked In URL, Date, Location, Claude Score,
            Claude notes, and Resume Treatment (Drive URL, Applications tab only).
+
+    bold_company: bolds the Company cell (column A) of the written row - used as a
+    visual flag for rows logged without a job description, so they are easy to spot
+    and revisit by eye instead of reading every note column.
     """
     try:
         service = get_sheets_service()
@@ -225,17 +373,54 @@ def log_job_to_sheet(job, score, assessment, tab_name="Applications", drive_link
         if drive_link and "Resume Treatment" in col_map:
             row[col_map["Resume Treatment"]] = drive_link
 
-        # Append to sheet
-        range_name = f"{tab_name}!A:ZZ"
+        # Write to the next empty row — via update() on an explicit A1 range,
+        # never values().append(). append() infers where to place a new row
+        # by heuristically detecting a "table" boundary from whatever
+        # non-empty cells it finds across the whole queried range; on this
+        # sheet (20 columns, many of them sparse — interview rounds,
+        # recordings, etc. — filled in by hand well after a row is first
+        # logged) that heuristic misjudged the table's start and wrote new
+        # rows starting several columns right of A instead of at A. Reading
+        # the real bottom of the sheet ourselves and writing to a pinned
+        # "A{row}:{last_col}{row}" range removes the ambiguity: the write
+        # can only ever land at column A of that exact row.
+        #
+        # Scan the full width (A:ZZ), not just A:{last_col}, so a stray
+        # value sitting further right than our own tracked columns still
+        # counts toward "the next empty row" — we must never pick a row
+        # number that already has data anywhere in it.
+        existing = service.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID, range=f"{tab_name}!A:ZZ"
+        ).execute().get("values", [])
+        next_row = len(existing) + 1  # 1-indexed; row 1 is the header
+
+        last_col = _col_letter(num_cols - 1)
+        range_name = f"{tab_name}!A{next_row}:{last_col}{next_row}"
         body = {"values": [row]}
-        service.spreadsheets().values().append(
+        service.spreadsheets().values().update(
             spreadsheetId=SHEET_ID,
             range=range_name,
             valueInputOption="USER_ENTERED",
             body=body
         ).execute()
 
-        print(f"      ✓ Logged to {tab_name} tab")
+        if bold_company:
+            gid = _get_sheet_gid(service, tab_name)
+            service.spreadsheets().batchUpdate(spreadsheetId=SHEET_ID, body={
+                "requests": [{
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": gid,
+                            "startRowIndex": next_row - 1, "endRowIndex": next_row,
+                            "startColumnIndex": col_map["Company"], "endColumnIndex": col_map["Company"] + 1,
+                        },
+                        "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                        "fields": "userEnteredFormat.textFormat.bold",
+                    }
+                }]
+            }).execute()
+
+        print(f"      ✓ Logged to {tab_name} tab (row {next_row})")
 
     except Exception as e:
         import traceback
@@ -268,6 +453,83 @@ def upload_to_drive(filepath, filename, folder_id=None):
 # ── JOB DESCRIPTION FETCHER ────────────────────────────────────────────────────
 
 SESSION_FILE = os.path.join(SCRIPT_DIR, "linkedin_session.json")
+
+
+def _looks_like_signup_gate(text: str) -> bool:
+    """True when scraped "description" text is actually an account/application
+    signup form rather than a job description. A form like this can easily
+    clear the >200-char length check (a country-name <select> alone runs to
+    thousands of characters) while containing none of the actual role content.
+    Kept intentionally narrow (an exact phrase, not a general heuristic) to
+    avoid ever discarding a real, unusually-formatted JD."""
+    return "enter your email to continue" in text.lower()
+
+
+# Exact phrases checked live against 10/10 real closed postings pulled from a
+# single Dynamite run (Rippling, Workable, Greenhouse, Lever, Ashby, and a
+# company's own career-site redirect) — every one of them hit at least one of
+# these. This is a job aggregator's index lagging behind the employer's own
+# ATS closing the req, not a scraper bug, and it will keep happening
+# periodically regardless of source. Kept as exact phrases (not a loose
+# heuristic) to avoid ever discarding a real JD that happens to mention
+# hiring status in passing.
+_CLOSED_POSTING_PHRASES = (
+    "no longer available",
+    "no longer open",
+    "no longer accepting",
+    "job not found",
+    "requested was not found",
+    "couldn't find anything here",
+    "might have closed",
+    "page not found",
+    "position has been filled",
+    "this job has been closed",
+    "posting is no longer accepting",
+)
+
+
+def _looks_like_closed_posting(text: str) -> bool:
+    t = text.lower()
+    return any(phrase in t for phrase in _CLOSED_POSTING_PHRASES)
+
+
+def _page_body_text(page) -> str:
+    """Raw visible body text, independent of fetch_job_description's own
+    selector-based extraction. Necessary because a closed-posting page is
+    often SHORT enough (a two-line "job not found" notice) that none of
+    fetch_job_description's >200-char selector matches ever fire — checked
+    live, jd came back completely empty for every Ashby/Lever closed
+    posting tested, which would silently skip a check gated on `jd` being
+    truthy even though the page loaded fine and says exactly what's wrong."""
+    try:
+        return page.evaluate("() => document.body.innerText") or ""
+    except Exception:
+        return ""
+
+
+def _job_id_from_url(url: str) -> str:
+    """Last non-empty path segment — for an ATS job posting this is almost
+    always the unique job identifier (UUID, numeric ID, or slug)."""
+    try:
+        path = urlparse(url).path.rstrip("/")
+    except Exception:
+        return ""
+    segments = [s for s in path.split("/") if s]
+    return segments[-1].lower() if segments else ""
+
+
+def _closed_by_silent_redirect(requested_url: str, final_url: str) -> bool:
+    """True when the page navigated away from the specific job to a generic
+    listing with no explicit "closed" text at all — observed live on
+    Rippling, which 302s a closed job straight to the bare company job list.
+    Only trusted when the dropped id is long/opaque enough (>=8 chars) that
+    its absence from the final URL isn't just an unrelated formatting
+    difference — a real UUID or ATS numeric ID clears this easily; a short
+    generic path segment does not."""
+    job_id = _job_id_from_url(requested_url)
+    if len(job_id) < 8:
+        return False
+    return job_id not in (final_url or "").lower()
 
 
 def fetch_job_description(page, url):
@@ -376,19 +638,32 @@ def fetch_job_description(page, url):
 
 # ── CLAUDE SCORING ─────────────────────────────────────────────────────────────
 
-def score_job(client, job, job_description, salary_minimum=0, preferred_locations=None, model="claude-sonnet-4-6"):
+def score_job(client, job, job_description, salary_minimum=0, preferred_locations=None, model="claude-sonnet-5"):
     """Scores a job against Dom's background. Returns dict with score + assessment +
     hard disqualification flags for salary and location."""
 
     if preferred_locations is None:
         preferred_locations = ["remote", "miami"]
 
+    # We do NOT ask the model to decide salary_disqualify itself — an LLM
+    # judgment call is the wrong tool for a hard yes/no business rule, and in
+    # practice it sometimes disqualified jobs that stated no salary at all
+    # ("can't assess it, so disqualify" reasoning creeping in despite being
+    # told not to). Instead we ask only for the plain fact — the maximum
+    # salary figure actually printed in the JD, or null if none is stated —
+    # and compute the disqualification ourselves in Python below. That makes
+    # "no salary listed" structurally incapable of disqualifying a job,
+    # regardless of anything the model writes in its reasoning.
     salary_clause = ""
     if salary_minimum and salary_minimum > 0:
         salary_clause = f"""
-SALARY DISQUALIFIER: The minimum acceptable total compensation is ${salary_minimum:,.0f}/year.
-- If the job description states a maximum salary (top of range) BELOW ${salary_minimum:,.0f}, set salary_disqualify: true.
-- If no salary is mentioned, or the salary meets or exceeds the threshold, set salary_disqualify: false.
+SALARY: Report the maximum total compensation figure (top of the stated range)
+explicitly printed in the job description, as a plain number in "salary_max_usd".
+- If the JD states a salary range or figure, put the TOP of that range/figure there.
+- If the JD does not state any salary figure at all, set salary_max_usd to null.
+  Do not guess, infer, or estimate a figure — null means "not stated", not "low".
+Dom's minimum acceptable total compensation is ${salary_minimum:,.0f}/year, for context only —
+do not use this to decide anything; just report what the JD states.
 """
 
     loc_list = ", ".join(str(l).title() for l in preferred_locations)
@@ -436,7 +711,7 @@ Return ONLY a JSON object:
   "assessment": "Your full assessment here with hard gaps as bullets if applicable",
   "role_type": "blockchain|fintech|ai|consumer|compliance|marketplace|other",
   "title_for_file": "Senior_PM_Crypto",
-  "salary_disqualify": false,
+  "salary_max_usd": null,
   "location_disqualify": false,
   "disqualify_reason": ""
 }}
@@ -445,28 +720,66 @@ No other text. Just the JSON."""
 
     response = client.messages.create(
         model=model,
-        max_tokens=1200,
+        max_tokens=3000,
         system=[{"type": "text", "text": BACKGROUND_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": prompt}],
+        **_adaptive_thinking_kwargs(model),
     )
     usage = response.usage
     if getattr(usage, "cache_read_input_tokens", 0):
         print(f"      [cache] {usage.cache_read_input_tokens:,} tokens read from cache")
 
-    raw = response.content[0].text.strip()
+    raw = _response_text(response).strip()
     raw = re.sub(r'^```json\s*', '', raw)
     raw = re.sub(r'^```\s*',     '', raw)
     raw = re.sub(r'\s*```$',     '', raw)
 
     try:
-        return json.loads(raw)
+        data = json.loads(raw)
     except Exception:
         return {"score": 0, "assessment": "Could not parse score", "role_type": "other", "title_for_file": "Senior_PM"}
+
+    # The JSON can parse fine while "score" itself is still unusable — the
+    # model sometimes decides it can't score (e.g. a too-short/truncated JD)
+    # and returns "score": null with an explanation instead of a number,
+    # even though it was told to always return a number. That crashed the
+    # pipeline downstream at `score >= score_threshold` (None vs float).
+    # Treat an unscoreable job as score 0 (skip it, matching the "N/A"/
+    # unfetchable-JD path) but keep the model's own explanation instead of
+    # discarding it, since it's usually a real diagnostic (JD too short/stub).
+    score_raw = data.get("score")
+    if isinstance(score_raw, bool) or not isinstance(score_raw, (int, float)) or not math.isfinite(score_raw):
+        print(f"      ⚠️  Model returned a non-numeric score ({score_raw!r}) — treating as 0/10.")
+        data["score"] = 0
+        if not data.get("assessment"):
+            data["assessment"] = "Model did not return a numeric score."
+    else:
+        data["score"] = float(score_raw)
+
+    # Compute salary_disqualify ourselves from the reported figure — never
+    # from a model-decided boolean. salary_max_usd must be a real positive
+    # number for disqualification to even be possible; null/missing/zero/
+    # non-numeric (i.e. "the JD didn't state a salary") always means False.
+    # See the comment on salary_clause above for why this moved out of the
+    # model's hands.
+    salary_max = data.get("salary_max_usd")
+    data["salary_disqualify"] = bool(
+        salary_minimum and salary_minimum > 0
+        and isinstance(salary_max, (int, float)) and not isinstance(salary_max, bool)
+        and salary_max > 0
+        and salary_max < salary_minimum
+    )
+    if data["salary_disqualify"]:
+        data["disqualify_reason"] = (
+            f"Max stated salary ${salary_max:,.0f} is below your ${salary_minimum:,.0f} minimum."
+        )
+
+    return data
 
 
 # ── RESUME BUILDER ─────────────────────────────────────────────────────────────
 
-def build_resume_content(client, job, job_description, score_data, model="claude-sonnet-4-6"):
+def build_resume_content(client, job, job_description, score_data, model="claude-sonnet-5"):
     """Asks Claude to produce the full tailored resume content as structured JSON."""
 
     role_type   = score_data.get("role_type", "other")
@@ -599,15 +912,16 @@ Return ONLY a JSON object. No markdown. No extra text. No explanation.
     for attempt in range(3):
         response = client.messages.create(
             model=model,
-            max_tokens=6000,
+            max_tokens=12000,
             system=[{"type": "text", "text": BACKGROUND_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=messages,
+            **_adaptive_thinking_kwargs(model),
         )
         usage = response.usage
         if getattr(usage, "cache_read_input_tokens", 0):
             print(f"      [cache] {usage.cache_read_input_tokens:,} tokens read from cache")
 
-        raw = response.content[0].text.strip() if response.content else ""
+        raw = _response_text(response).strip()
         last_raw = raw
         brace_idx = raw.find("{")
 
@@ -838,8 +1152,8 @@ def run_pipeline(jobs, test_scoring_only=False):
     salary_minimum     = pipeline_cfg["salary_minimum"]
     preferred_locs     = pipeline_cfg["preferred_locations"]
     gdrive_folder      = pipeline_cfg.get("gdrive_folder_id") or GDRIVE_FOLDER_ID
-    scoring_model      = pipeline_cfg.get("scoring_model", "claude-sonnet-4-6")
-    resume_model        = pipeline_cfg.get("resume_model",         "claude-sonnet-4-6")
+    scoring_model      = pipeline_cfg.get("scoring_model", "claude-sonnet-5")
+    resume_model        = pipeline_cfg.get("resume_model",         "claude-sonnet-5")
     resume_output_fmt   = pipeline_cfg.get("resume_output_format", "docx").lower()
 
     print(f"\n{'='*65}")
@@ -856,6 +1170,11 @@ def run_pipeline(jobs, test_scoring_only=False):
     client   = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     results  = []
     built    = 0
+
+    sheets_service = get_sheets_service()
+    print("Checking Applications + Skips tabs for already-logged jobs...")
+    applied_pairs, applied_urls = load_applied_from_sheet(sheets_service)
+    print(f"  {len(applied_pairs)} job pairs, {len(applied_urls)} URLs loaded\n")
 
     # Open one browser session with LinkedIn cookies for all JD fetching
     with sync_playwright() as p:
@@ -888,25 +1207,72 @@ def run_pipeline(jobs, test_scoring_only=False):
 
             print(f"[{i}/{len(jobs)}]  {title} @ {company}")
 
+            if is_already_logged(job, applied_pairs, applied_urls):
+                print("      Already in Applications/Skips (matched by URL/Linked In URL) — skipping")
+                continue
+
             # 1. Fetch job description
             #    Primary:    apply URL (external apply link always takes precedence;
             #                for Easy Apply jobs this URL is the LinkedIn listing itself)
             #    Fallback 1: listing page URL (LinkedIn "About the job" / BuiltIn page) —
             #                also the effective source for Easy Apply jobs above
             #    Fallback 2: pre-scraped listing text (BuiltIn "The Role") — last resort
-            #    No JD:      log to Applications and skip — don't create an application
+            #    No JD:      log to Skips (Company bolded as a visual flag) and skip — don't create an application
             print("      Fetching job description...")
             jd = ""
+            closed = False
 
             if url:
                 jd = fetch_job_description(page, url)
-                if jd:
+                # Checked independently of `jd` — a closed-posting notice is
+                # often short enough ("Job not found") that none of
+                # fetch_job_description's own >200-char selectors ever match,
+                # so jd comes back empty even though the page loaded fine and
+                # plainly says what's wrong. A job board's search index can
+                # lag behind the employer's own ATS closing the req — checked
+                # live, 10/10 candidates from one Dynamite run turned out to
+                # be closed postings (Rippling/Workable/Greenhouse/Lever/
+                # Ashby), each burning a Claude scoring call and a built
+                # resume for nothing. Catch it here, before either is spent.
+                if _looks_like_closed_posting(_page_body_text(page)) or _closed_by_silent_redirect(url, page.url):
+                    print(f"      Apply URL shows this posting is closed/expired — not scoring, logging to Skips")
+                    jd, closed = "", True
+                elif jd and _looks_like_signup_gate(jd):
+                    # Seen on Dynamite's Apply Now intermediary for jobs without an
+                    # external ATS (dynamitejobs.com/apply/<id>): "Enter your email
+                    # to continue" plus a full country-name <select> dropdown, which
+                    # is >200 chars of real text — passes the length check below but
+                    # is not a job description. Treat it as a failed fetch so the
+                    # real content (listing page, then the pre-scraped description)
+                    # gets a chance instead of Claude scoring an email/country form.
+                    print(f"      Apply URL returned a signup-gate page, not a JD ({len(jd)} chars) — discarding")
+                    jd = ""
+                elif jd:
                     print(f"      Got description from apply URL ({len(jd)} chars)")
 
-            if not jd and linkedin_url and linkedin_url != url:
+            if not closed and not jd and linkedin_url and linkedin_url != url:
                 jd = fetch_job_description(page, linkedin_url)
-                if jd:
+                if _looks_like_closed_posting(_page_body_text(page)) or _closed_by_silent_redirect(linkedin_url, page.url):
+                    print(f"      Listing page shows this posting is closed/expired — not scoring, logging to Skips")
+                    jd, closed = "", True
+                elif jd and _looks_like_signup_gate(jd):
+                    print(f"      Listing page returned a signup-gate page, not a JD ({len(jd)} chars) — discarding")
+                    jd = ""
+                elif jd:
                     print(f"      Got description from listing page ({len(jd)} chars)")
+
+            if closed:
+                # Deliberately skips the pre-scraped-description fallback below —
+                # that text was captured when the posting still looked open, so
+                # using it here would just re-introduce the exact stale data
+                # that got us here, and spend the Claude call anyway.
+                log_job_to_sheet(
+                    job, "N/A",
+                    "Position closed / no longer accepting applications — not scored",
+                    tab_name="Skips",
+                    bold_company=True,
+                )
+                continue
 
             if not jd:
                 scraped_desc = job.get("description", "")
@@ -915,11 +1281,12 @@ def run_pipeline(jobs, test_scoring_only=False):
                     print(f"      Using pre-scraped listing description ({len(jd)} chars)")
 
             if not jd:
-                print("      Could not fetch job description by any means — logging and skipping")
+                print("      Could not fetch job description by any means — logging to Skips")
                 log_job_to_sheet(
                     job, "N/A",
                     "Could not fetch job description — no application created",
-                    tab_name="Applications",
+                    tab_name="Skips",
+                    bold_company=True,
                 )
                 continue
 
@@ -946,6 +1313,17 @@ def run_pipeline(jobs, test_scoring_only=False):
 
             # 3. Build resume if score meets threshold (unless in test mode)
             if score >= score_threshold:
+                # Re-check fresh against the sheet right before committing to a build —
+                # closes the race window where a concurrent/overlapping run logged this
+                # same job while this one was fetching the JD and scoring with Claude.
+                if not test_scoring_only:
+                    applied_pairs, applied_urls = load_applied_from_sheet(sheets_service)
+                    if is_already_logged(job, applied_pairs, applied_urls):
+                        print("      Already logged by another run just now (matched by URL/Linked In URL) — skipping build")
+                        results.append({**job, "score": score, "assessment": assessment, "resume_built": False, "drive_link": None})
+                        print()
+                        continue
+
                 if test_scoring_only:
                     print(f"      Score >= {score_threshold} -- would build resume (skipped in test mode)")
                     log_job_to_sheet(job, score, assessment, tab_name="Applications")

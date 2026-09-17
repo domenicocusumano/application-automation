@@ -72,7 +72,7 @@
   .panel.active { display: flex; }
 
   /* ── RUN PANEL ── */
-  #panel-run { gap: 16px; }
+  #panel-run, #panel-manual { gap: 16px; }
 
   .run-controls {
     display: flex;
@@ -213,8 +213,13 @@
   }
   #relogin-btn:hover { background: #ef4444; }
   #relogin-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #relogin-builtin-btn { background: #f87171; color: #0f0f17; border: none; border-radius: 6px;
+    padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: background 0.15s, opacity 0.15s; display: none; }
+  #relogin-builtin-btn:hover { background: #ef4444; }
+  #relogin-builtin-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  #log {
+  #log, #manual-log {
     flex: 1;
     background: #0a0a12;
     border: 1px solid #1e1e2e;
@@ -229,9 +234,9 @@
     word-break: break-word;
     min-height: 0;
   }
-  #log .dim   { color: #52525b; }
-  #log .warn  { color: #facc15; }
-  #log .error { color: #f87171; }
+  #log .dim,   #manual-log .dim   { color: #52525b; }
+  #log .warn,  #manual-log .warn  { color: #facc15; }
+  #log .error, #manual-log .error { color: #f87171; }
 
   /* ── PROMPT PANELS ── */
   .prompt-panel { gap: 12px; }
@@ -376,6 +381,7 @@
 
 <nav>
   <button class="active" onclick="showTab('run')">Run</button>
+  <button onclick="showTab('manual')">Manual Upload</button>
   <button onclick="showTab('background')">Background Prompt</button>
   <button onclick="showTab('resume')">Resume</button>
   <button onclick="showTab('settings')">Settings</button>
@@ -391,8 +397,25 @@
       <span id="session-label">Checking session...</span>
       <button id="relogin-btn" onclick="startRelogin()">Re-login LinkedIn</button>
     </div>
+    <div class="session-control">
+      <div class="session-dot" id="builtin-session-dot"></div>
+      <span id="builtin-session-label">Checking Built-in session...</span>
+      <button id="relogin-builtin-btn" onclick="startBuiltinRelogin()">Re-login Built-in</button>
+    </div>
   </div>
   <div id="log"><span class="dim">Output will appear here...</span></div>
+</div>
+
+<div id="panel-manual" class="panel">
+  <div class="run-controls">
+    <input type="text" id="manual-url-input" class="url-input" style="flex:1; min-width:300px"
+           placeholder="https://... paste a job posting URL">
+    <button id="manual-run-btn" onclick="runManualUpload()">Analyze &amp; Add</button>
+    <button id="manual-cancel-btn" onclick="cancelManualUpload()" style="display:none">Cancel</button>
+    <span id="manual-status">Ready</span>
+  </div>
+  <div class="field-desc" style="margin: 0 0 12px">Paste a link to a job posting you found yourself or someone sent you. It runs through the same scoring, threshold check, resume building, and Applications/Skips logging as the scrapers — just for this one URL.</div>
+  <div id="manual-log"><span class="dim">Output will appear here...</span></div>
 </div>
 
 <div id="panel-background" class="panel prompt-panel">
@@ -444,8 +467,8 @@
       <div class="field-desc">Model used to evaluate each job against your resume and assign a score. Haiku is ~20× cheaper and accurate enough for pass/fail decisions.</div>
       <select id="scoring-model-select" class="text-input-sm">
         <option value="claude-haiku-4-5-20251001">Haiku 4.5 — fastest, cheapest</option>
-        <option value="claude-sonnet-4-6">Sonnet 4.6 — balanced</option>
-        <option value="claude-opus-4-8">Opus 4.8 — most capable</option>
+        <option value="claude-sonnet-5">Sonnet 5 — balanced</option>
+        <option value="claude-opus-5">Opus 5 — most capable</option>
       </select>
     </div>
     <div class="settings-field">
@@ -453,8 +476,8 @@
       <div class="field-desc">Model used to tailor your resume content for each job. This directly affects output quality — Sonnet or Opus recommended.</div>
       <select id="resume-model-select" class="text-input-sm">
         <option value="claude-haiku-4-5-20251001">Haiku 4.5 — fastest, cheapest</option>
-        <option value="claude-sonnet-4-6">Sonnet 4.6 — balanced</option>
-        <option value="claude-opus-4-8">Opus 4.8 — most capable</option>
+        <option value="claude-sonnet-5">Sonnet 5 — balanced</option>
+        <option value="claude-opus-5">Opus 5 — most capable</option>
       </select>
     </div>
     <div class="settings-field">
@@ -510,6 +533,11 @@
       <div class="field-desc">Minimum acceptable annual salary. Only applies when a listing includes structured salary data. Set to 0 to disable. (Most LinkedIn and Built-in listings don't include salary — this is for future use.)</div>
       <input type="number" id="salary-minimum-input" class="number-input" min="0" step="1000">
     </div>
+    <div class="settings-field">
+      <span class="field-label">Candidates per run</span>
+      <div class="field-desc">How many candidates each scraper collects before stopping (Built-in, Dynamite). Higher values scan more pages and take longer to run.</div>
+      <input type="number" id="max-candidates-input" class="number-input" min="1" step="1">
+    </div>
   </div>
 
   <!-- ── LinkedIn ── -->
@@ -557,6 +585,24 @@
     </div>
   </div>
 
+  <!-- ── Dynamite Jobs ── -->
+  <div class="settings-section">
+    <div class="settings-section-title">Dynamite Jobs</div>
+    <div class="settings-field">
+      <label class="checkbox-label">
+        <input type="checkbox" id="dynamite-enabled-cb" onchange="updateRunBtnState()">
+        Enable Dynamite Jobs scraper
+      </label>
+      <div class="field-desc">When enabled, Run Pipeline scrapes Dynamite Jobs instead of LinkedIn/Built-in — only one scraper runs per pipeline execution. No login required.</div>
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Search URL</span>
+      <div class="field-desc">Paste your dynamitejobs.com search results page URL here (either <code style="color:#71717a">/my-jobs?text=...</code> or the public <code style="color:#71717a">/remote-jobs?text=...</code> — only the search text is used, so either works the same). Pagination and filtering beyond the text search aren't replicated yet.</div>
+      <input type="text" id="dynamite-url-input" class="url-input"
+             placeholder="https://dynamitejobs.com/remote-jobs?text=...">
+    </div>
+  </div>
+
   <!-- ── Google Sheets ── -->
   <div class="settings-section">
     <div class="settings-section-title">Google Sheets</div>
@@ -582,6 +628,7 @@
   // ── TAB SWITCHING ──────────────────────────────────────────────────────────
   const TAB_MAP = {
     'run':         'panel-run',
+    'manual':      'panel-manual',
     'background':  'panel-background',
     'resume':      'panel-resume',
     'settings':    'panel-settings',
@@ -710,6 +757,72 @@
     cancelBtn.disabled = false;
   }
 
+  async function cancelManualUpload() {
+    const cancelBtn = document.getElementById('manual-cancel-btn');
+    cancelBtn.disabled = true;
+    await fetch('/cancel', { method: 'POST' });
+    cancelBtn.disabled = false;
+  }
+
+  let manualEs = null;
+
+  async function runManualUpload() {
+    if (manualEs) return;
+
+    const urlInput  = document.getElementById('manual-url-input');
+    const url       = urlInput.value.trim();
+    const btn       = document.getElementById('manual-run-btn');
+    const cancelBtn = document.getElementById('manual-cancel-btn');
+    const status    = document.getElementById('manual-status');
+    const log       = document.getElementById('manual-log');
+
+    if (!url) {
+      status.textContent = 'Paste a URL first';
+      status.className = 'save-status error';
+      return;
+    }
+
+    btn.disabled = true;
+    cancelBtn.style.display = '';
+    status.textContent = 'Running...';
+    status.className = 'running';
+    log.innerHTML = '';
+
+    manualEs = new EventSource('/manual-upload?url=' + encodeURIComponent(url));
+
+    manualEs.onmessage = (e) => {
+      const line = e.data;
+      if (line === '[DONE]') {
+        manualEs.close(); manualEs = null;
+        btn.disabled = false;
+        cancelBtn.style.display = 'none';
+        return;
+      }
+      log.innerHTML += colorize(line);
+      log.scrollTop = log.scrollHeight;
+
+      if (line.startsWith('── Process exited with code')) {
+        const code = parseInt(line.match(/code (\d+)/)?.[1] ?? '0');
+        if (code === 0) {
+          status.textContent = 'Done';
+          status.className = 'done';
+        } else {
+          status.textContent = `Exited (code ${code})`;
+          status.className = 'error';
+        }
+      }
+    };
+
+    manualEs.onerror = () => {
+      manualEs.close(); manualEs = null;
+      btn.disabled = false;
+      cancelBtn.style.display = 'none';
+      status.textContent = 'Connection lost';
+      status.className = 'error';
+      log.innerHTML += '<span class="error">Connection to server lost.</span>\n';
+    };
+  }
+
   async function runPipeline() {
     if (es) return;
 
@@ -724,8 +837,9 @@
     await saveConfig('status-settings');
 
     const builtinEnabled = document.getElementById('builtin-enabled-cb').checked;
+    const dynamiteEnabled = document.getElementById('dynamite-enabled-cb').checked;
 
-    if (!builtinEnabled) {
+    if (!builtinEnabled && !dynamiteEnabled) {
       status.textContent = 'Checking session...';
       status.className = '';
       await checkSession();
@@ -786,6 +900,10 @@
     return document.getElementById('builtin-enabled-cb').checked;
   }
 
+  function dynamiteActive() {
+    return document.getElementById('dynamite-enabled-cb').checked;
+  }
+
   async function checkSession() {
     const dot      = document.getElementById('session-dot');
     const label    = document.getElementById('session-label');
@@ -806,14 +924,14 @@
         dot.className = 'session-dot invalid';
         label.textContent = 'Session expired — re-login required';
         relogin.style.display = 'inline-block';
-        if (!builtinActive()) runBtn.disabled = true;
+        if (!builtinActive() && !dynamiteActive()) runBtn.disabled = true;
       }
     } catch (e) {
       sessionValid = false;
       dot.className = 'session-dot invalid';
       label.textContent = 'Could not check session';
       relogin.style.display = 'inline-block';
-      if (!builtinActive()) runBtn.disabled = true;
+      if (!builtinActive() && !dynamiteActive()) runBtn.disabled = true;
     }
   }
 
@@ -848,6 +966,62 @@
     };
   }
 
+  async function checkBuiltinSession() {
+    const dot     = document.getElementById('builtin-session-dot');
+    const label   = document.getElementById('builtin-session-label');
+    const relogin = document.getElementById('relogin-builtin-btn');
+    dot.className = 'session-dot';
+    label.textContent = 'Checking Built-in session...';
+    try {
+      const r = await fetch('/check-builtin-session');
+      const data = await r.json();
+      if (data.valid) {
+        dot.className = 'session-dot valid';
+        label.textContent = 'Built-in session active';
+        relogin.style.display = 'none';
+      } else {
+        dot.className = 'session-dot invalid';
+        label.textContent = 'Built-in: ' + data.reason;
+        relogin.style.display = 'inline-block';
+      }
+    } catch (e) {
+      dot.className = 'session-dot invalid';
+      label.textContent = 'Could not check Built-in session';
+      relogin.style.display = 'inline-block';
+    }
+  }
+
+  let reloginBuiltinEs = null;
+
+  function startBuiltinRelogin() {
+    if (reloginBuiltinEs) return;
+    const reloginBtn = document.getElementById('relogin-builtin-btn');
+    const label      = document.getElementById('builtin-session-label');
+    const log        = document.getElementById('log');
+    reloginBtn.disabled = true;
+    label.textContent = 'Opening browser — log in to Built-in in the window that appeared...';
+    log.innerHTML = '';
+
+    reloginBuiltinEs = new EventSource('/relogin-builtin');
+    reloginBuiltinEs.onmessage = (e) => {
+      const line = e.data;
+      if (line === '[DONE]') {
+        reloginBuiltinEs.close(); reloginBuiltinEs = null;
+        reloginBtn.disabled = false;
+        checkBuiltinSession();
+        return;
+      }
+      log.innerHTML += esc(line) + '\n';
+      log.scrollTop = log.scrollHeight;
+      label.textContent = line;
+    };
+    reloginBuiltinEs.onerror = () => {
+      reloginBuiltinEs.close(); reloginBuiltinEs = null;
+      reloginBtn.disabled = false;
+      label.textContent = 'Re-login failed — check terminal';
+    };
+  }
+
   // ── CONFIG ─────────────────────────────────────────────────────────────────
   let configLoaded = false;
 
@@ -863,6 +1037,8 @@
       document.getElementById('linkedin-search-input').value     = data.linkedin_search_term || 'Product Manager';
       document.getElementById('builtin-enabled-cb').checked      = data.builtin_enabled;
       document.getElementById('builtin-url-input').value         = data.builtin_url || '';
+      document.getElementById('dynamite-enabled-cb').checked     = data.dynamite_enabled;
+      document.getElementById('dynamite-url-input').value        = data.dynamite_url || '';
       // Title Filters
       const titleKws   = data.title_keywords       || [];
       const exclTitles = data.excluded_titles      || [];
@@ -876,13 +1052,14 @@
       const locs  = data.preferred_locations || ['remote', 'miami'];
       document.getElementById('preferred-locations-input').value = locs.join(', ');
       document.getElementById('salary-minimum-input').value      = data.salary_minimum || 0;
+      document.getElementById('max-candidates-input').value      = data.max_candidates || 10;
       // Google Sheets
       document.getElementById('google-sheet-url-input').value    = data.google_sheet_url || '';
       // Models
-      document.getElementById('scoring-model-select').value        = data.scoring_model        || 'claude-sonnet-4-6';
-      document.getElementById('resume-model-select').value         = data.resume_model         || 'claude-sonnet-4-6';
+      document.getElementById('scoring-model-select').value        = data.scoring_model        || 'claude-sonnet-5';
+      document.getElementById('resume-model-select').value         = data.resume_model         || 'claude-sonnet-5';
       document.getElementById('resume-output-format-select').value = data.resume_output_format || 'docx';
-      if (data.builtin_enabled) {
+      if (data.builtin_enabled || data.dynamite_enabled) {
         document.getElementById('run-btn').disabled = false;
       }
       configLoaded = true;
@@ -892,7 +1069,7 @@
   }
 
   function updateRunBtnState() {
-    if (builtinActive()) {
+    if (builtinActive() || dynamiteActive()) {
       document.getElementById('run-btn').disabled = false;
     } else {
       checkSession();
@@ -917,6 +1094,8 @@
     const linkedinSearchTerm = document.getElementById('linkedin-search-input').value.trim();
     const builtinEnabled     = document.getElementById('builtin-enabled-cb').checked;
     const builtinUrl         = document.getElementById('builtin-url-input').value.trim();
+    const dynamiteEnabled    = document.getElementById('dynamite-enabled-cb').checked;
+    const dynamiteUrl        = document.getElementById('dynamite-url-input').value.trim();
     // Title Filters
     const titleKeywords      = document.getElementById('title-keywords-input').value
                                  .split('\n').map(s => s.trim()).filter(Boolean);
@@ -931,6 +1110,8 @@
                                  .split(',').map(s => s.trim()).filter(Boolean);
     const rawSalary          = parseFloat(document.getElementById('salary-minimum-input').value);
     const salaryMinimum      = isNaN(rawSalary) ? 0 : rawSalary;
+    const rawMaxCandidates   = parseInt(document.getElementById('max-candidates-input').value, 10);
+    const maxCandidates      = (isNaN(rawMaxCandidates) || rawMaxCandidates < 1) ? 10 : rawMaxCandidates;
     // Google Sheets
     const googleSheetUrl     = document.getElementById('google-sheet-url-input').value.trim();
     // Models
@@ -953,12 +1134,15 @@
           linkedin_search_term: linkedinSearchTerm,
           builtin_enabled:      builtinEnabled,
           builtin_url:          builtinUrl,
+          dynamite_enabled:     dynamiteEnabled,
+          dynamite_url:         dynamiteUrl,
           title_keywords:       titleKeywords,
           excluded_titles:      excludedTitles,
           excluded_title_words: excludedTitleWords,
           seniority_tiers:      seniorityTiers,
           preferred_locations:  preferredLocations,
           salary_minimum:       salaryMinimum,
+          max_candidates:       maxCandidates,
           google_sheet_url:     googleSheetUrl,
           scoring_model:         scoringModel,
           resume_model:          resumeModel,
@@ -983,7 +1167,7 @@
   loadPrompt('background');
   loadResume();
   // Load config first so builtin-enabled state is known before checkSession touches runBtn.
-  (async () => { await loadConfig(); await checkSession(); })();
+  (async () => { await loadConfig(); await checkSession(); await checkBuiltinSession(); })();
 </script>
 </body>
 </html>
