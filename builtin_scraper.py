@@ -46,6 +46,16 @@ MAX_CANDIDATES = 10
 DETAIL_PAUSE    = 1.5
 DETAIL_BACKOFF  = (10, 20, 40)
 
+# Individual rate-limit hits are already handled by DETAIL_BACKOFF's retry —
+# this is the escape hatch for when the whole run is stuck, not just one
+# job. If every (or nearly every) page in a row eats at least one backoff,
+# that's Cloudflare rate-limiting the session as a whole, not a one-off
+# blip — continuing to grind through MAX_PAGES at 10-40s per hit just burns
+# time for a handful of extra candidates. Once RATE_LIMIT_PAGE_THRESHOLD
+# consecutive pages each see >=1 rate-limit event, stop scraping and hand
+# off whatever candidates were already collected to the resume pipeline.
+RATE_LIMIT_PAGE_THRESHOLD = 3
+
 GOOGLE_CREDS_FILE = Path(__file__).parent / os.getenv("GOOGLE_CREDS_FILE", "google_credentials.json")
 
 # ── TITLE FILTERS ──────────────────────────────────────────────────────────────
@@ -387,7 +397,19 @@ async def _is_rate_limited(page, response) -> bool:
         return False
 
 
-async def _goto_detail(page, job_url: str) -> bool:
+class RateLimitTracker:
+    """Counts rate-limit events across the whole run so the main page loop
+    can tell an isolated blip (one job, quickly recovered) apart from
+    Cloudflare rate-limiting the session as a whole (see
+    RATE_LIMIT_PAGE_THRESHOLD)."""
+    def __init__(self):
+        self.events = 0
+
+    def bump(self):
+        self.events += 1
+
+
+async def _goto_detail(page, job_url: str, tracker: "RateLimitTracker") -> bool:
     """
     Navigate to a job detail page, retrying through Cloudflare rate limits.
 
@@ -401,6 +423,7 @@ async def _goto_detail(page, job_url: str) -> bool:
         return True
 
     for delay in DETAIL_BACKOFF:
+        tracker.bump()
         log(f"    [rate-limited] Cloudflare challenge — backing off {delay}s and retrying")
         await asyncio.sleep(delay)
         response = await page.goto(job_url, wait_until="domcontentloaded", timeout=DETAIL_TIMEOUT)
@@ -409,7 +432,7 @@ async def _goto_detail(page, job_url: str) -> bool:
     return False
 
 
-async def scrape_job_detail(page, job_url: str) -> dict:
+async def scrape_job_detail(page, job_url: str, tracker: "RateLimitTracker") -> dict:
     """
     Fetch company, location, job description, Easy Apply status, and actual apply URL
     from a Built-in job detail page.
@@ -423,7 +446,7 @@ async def scrape_job_detail(page, job_url: str) -> dict:
     # jobPostInit payload, which outranks every DOM heuristic below.
     trusted_apply = False
     try:
-        if not await _goto_detail(page, job_url):
+        if not await _goto_detail(page, job_url, tracker):
             result["blocked"] = True
             log(f"    [blocked] Cloudflare kept challenging {job_url} — skipping this job")
             return result
@@ -479,6 +502,7 @@ async def scrape_job_detail(page, job_url: str) -> dict:
                     # schedule as the detail navigation.
                     for attempt, delay in enumerate((0,) + DETAIL_BACKOFF):
                         if delay:
+                            tracker.bump()
                             log(f"    [rate-limited] apply redirect challenged — backing off {delay}s and retrying")
                             await asyncio.sleep(delay)
                         try:
@@ -1021,10 +1045,13 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
 
         current_url = start_url
         page_num    = 1
+        tracker     = RateLimitTracker()
+        consecutive_limited_pages = 0
 
         while page_num <= MAX_PAGES and len(candidates) < max_candidates:
             log(f"[Built-in] ── Page {page_num} ──────────────────────────────────────")
             log(f"[Built-in] {current_url}")
+            events_before_page = tracker.events
 
             try:
                 await list_page.goto(current_url, wait_until="networkidle", timeout=NAV_TIMEOUT)
@@ -1087,7 +1114,7 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
                     await asyncio.sleep(DETAIL_PAUSE)
                 visited_detail += 1
 
-                detail = await scrape_job_detail(detail_page, url)
+                detail = await scrape_job_detail(detail_page, url, tracker)
 
                 # Challenged on every attempt — the page we saw was Cloudflare's
                 # interstitial, not the job. Its company/apply URL would both be
@@ -1134,6 +1161,24 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
                 f"{f' | Rate-limited: {blocked}' if blocked else ''}"
             )
             log(f"  Candidates so far: {len(candidates)} / {max_candidates}")
+
+            # Individual rate-limit hits are already retried (DETAIL_BACKOFF)
+            # and don't stop anything on their own — this is for when nearly
+            # every page in a row eats at least one, which means Cloudflare
+            # is rate-limiting the session as a whole, not one unlucky job.
+            # Grinding through MAX_PAGES at 10-40s per hit for a handful more
+            # candidates isn't worth it — stop and hand off what we have.
+            if tracker.events > events_before_page:
+                consecutive_limited_pages += 1
+            else:
+                consecutive_limited_pages = 0
+
+            if consecutive_limited_pages >= RATE_LIMIT_PAGE_THRESHOLD:
+                log(
+                    f"\n[Built-in] Rate-limited on {consecutive_limited_pages} pages in a row — "
+                    f"stopping early with {len(candidates)} candidate(s) and moving on to the resume pipeline."
+                )
+                break
 
             if len(candidates) >= max_candidates:
                 log(f"\n[Built-in] Reached {max_candidates} candidates — done scraping.")
