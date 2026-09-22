@@ -25,6 +25,8 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
+from dedup_common import pairs_match
+
 load_dotenv()
 
 SCRIPT_DIR     = Path(__file__).parent
@@ -73,6 +75,11 @@ _DEFAULT_SENIORITY_TIERS = [
 
 
 def is_excluded_title(title: str, excl_titles=None, excl_words=None) -> bool:
+    # Two different match strategies on purpose: excl_titles are phrases, so
+    # substring match lets multi-word phrases like "program manager" reject
+    # correctly; excl_words are single words, so they're matched whole-word
+    # (via split) instead of substring — otherwise a word like "lead" would
+    # also reject titles containing "leadership".
     t = title.lower()
     _excl_titles = set(excl_titles) if excl_titles is not None else _DEFAULT_EXCLUDED_TITLES
     _excl_words  = set(excl_words)  if excl_words  is not None else _DEFAULT_EXCLUDED_TITLE_WORDS
@@ -239,18 +246,7 @@ def already_applied(job: dict, applied_pairs: set, applied_urls: set) -> bool:
 
     company = job.get("company", "").lower().strip()
     title   = job.get("title",   "").lower().strip()
-
-    if (company, title) in applied_pairs:
-        return True
-
-    for (ac, at) in applied_pairs:
-        if ac and company and (ac in company or company in ac):
-            t_words  = set(title.split())
-            at_words = set(at.split())
-            if len(t_words & at_words) >= 2:
-                return True
-
-    return False
+    return pairs_match(company, title, applied_pairs)
 
 
 def check_builtin_session():
@@ -870,6 +866,9 @@ async def extract_jobs_from_page(list_page) -> List[dict]:
     for sel in SELECTORS:
         try:
             found = await list_page.query_selector_all(sel)
+            # Require >=2 matches, not just >=1 — a stray single match (e.g. a
+            # "back to jobs" or "similar jobs" link elsewhere on the page)
+            # would otherwise be accepted as if it were the real job list.
             if len(found) >= 2:
                 links = found
                 used_sel = sel
@@ -973,6 +972,12 @@ async def find_next_url(list_page, page_num: int, current_url: str) -> Optional[
             except (ValueError, IndexError):
                 pass
 
+    # Last resort, page 1 only: no Next control matched and the URL has no
+    # page param to increment yet, so there's nothing to infer a page 3+ URL
+    # from. Blindly appending page=2 is a one-time bet to get pagination
+    # started; if it's wrong, extract_jobs_from_page will just find nothing
+    # and the caller stops. Not repeated on later pages because by then a
+    # real page param exists and the branch above should have already fired.
     if page_num == 1 and "page=" not in current_url:
         sep = "&" if "?" in current_url else "?"
         return f"{current_url}{sep}page=2"
@@ -1040,6 +1045,10 @@ async def scrape_builtin(start_url: str, config: dict) -> List[dict]:
 
         await context.route("**/*", _block_heavy_assets)
 
+        # Separate pages so visiting job details never disturbs the search
+        # results page's scroll position or DOM — find_next_url() needs
+        # list_page still sitting on the current results page. detail_page is
+        # reused across every job rather than opened fresh per job.
         list_page   = await context.new_page()
         detail_page = await context.new_page()
 

@@ -39,6 +39,8 @@ from urllib.parse import urlparse, parse_qs
 import requests
 from dotenv import load_dotenv
 
+from dedup_common import pairs_match
+
 load_dotenv()
 
 SCRIPT_DIR  = Path(__file__).parent
@@ -214,6 +216,13 @@ def load_applied_jobs():
 
 def already_applied(job: dict, applied_pairs: set, applied_urls: set) -> bool:
     """Returns True if this job is already in the applied/skips sheet."""
+    # Checks scraper-internal field names, not the sheet's final column
+    # names: at this point in the flow job["url"] is still the Dynamite
+    # listing permalink and job["apply_url"] is the resolved external apply
+    # URL — they're only remapped to url/linkedin_url (matching the sheet's
+    # URL/Linked In URL columns) at hand-off in __main__, after this dedup
+    # loop has already run. Checking both here covers both possible sheet
+    # matches even though the names don't line up with the sheet yet.
     for field in ["apply_url", "url"]:
         norm = normalize_url(job.get(field, ""))
         if norm and norm in applied_urls:
@@ -221,17 +230,7 @@ def already_applied(job: dict, applied_pairs: set, applied_urls: set) -> bool:
 
     company = job.get("company", "").lower().strip()
     title   = job.get("title", "").lower().strip()
-
-    if (company, title) in applied_pairs:
-        return True
-
-    for (ac, at) in applied_pairs:
-        if ac and company and (ac in company or company in ac):
-            t_words  = set(title.split())
-            at_words = set(at.split())
-            if len(t_words & at_words) >= 2:
-                return True
-    return False
+    return pairs_match(company, title, applied_pairs)
 
 
 # ── ALGOLIA SEARCH ─────────────────────────────────────────────────────────────
@@ -254,6 +253,11 @@ def _format_location(slugs) -> str:
     itself and is a job for the AI scoring stage added in a later phase."""
     if not slugs:
         return "Remote"
+    # Every listing on this site is remote by definition (it's scraped from
+    # /remote-jobs) — locationSlugs denotes eligibility geography (e.g. which
+    # countries/regions a remote worker must be based in), not work model, so
+    # the "Remote —" prefix is always correct here even though the slugs
+    # themselves never say "remote" explicitly.
     seen: set = set()
     ordered = []
     for s in slugs:
@@ -308,6 +312,14 @@ def _extract_category_filters(url: str) -> list:
 
 
 def _algolia_search(query: str, page: int, category_filters: Optional[list] = None) -> dict:
+    # This whole body — facetFilters included — is copied verbatim from what
+    # the site's own search box sends (captured from the browser's network
+    # tab, per the module docstring), not reverse-engineered from Algolia
+    # docs alone. The nested array is an OR group, the flat strings AND with
+    # it: (isVisible OR isFinished OR isExpired OR isFulfilled) AND NOT
+    # isBlocked. Counterintuitive that isExpired/isFulfilled are OR'd in as
+    # "true" rather than excluded, but that's what the live UI itself
+    # queries for, so it's left as-is rather than "corrected".
     facet_filters = [
         ["flags.isVisible:true", "flags.isFinished:true",
          "flags.isExpired:true", "flags.isFulfilled:true"],
@@ -323,6 +335,12 @@ def _algolia_search(query: str, page: int, category_filters: Optional[list] = No
             "hitsPerPage": HITS_PER_PAGE,
             "facetFilters": facet_filters,
             "optionalFilters": [],
+            # Standard Algolia query-relaxation knobs, also copied from the
+            # live request: removeWordsIfNoResults progressively drops
+            # trailing query words if the full phrase has zero hits;
+            # disableExactOnAttributes stops an exact phrase match inside
+            # the (huge) description field from outranking real title/company
+            # matches in relevance scoring.
             "disableExactOnAttributes": ["description"],
             "removeWordsIfNoResults": "lastWords",
         }]

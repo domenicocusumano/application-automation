@@ -135,6 +135,11 @@ def _extract_title_and_company(page, url: str) -> tuple:
     title = ""
     if company and len(segments) >= 2:
         non_company = [s for s in segments if not _looks_like_company(s, company)]
+        # Only trust the split when removing company-matching segment(s)
+        # leaves exactly one segment behind — if 0 or 2+ remain, the company
+        # match was ambiguous (matched nothing, or matched more than one
+        # segment) and it's safer to fall through to the regex/first-segment
+        # heuristics below than guess wrong.
         if len(non_company) == len(segments) - 1:
             title = non_company[0] if len(non_company) == 1 else " - ".join(non_company)
 
@@ -229,6 +234,10 @@ if __name__ == "__main__":
     log(f"[Manual] Company:  {company or '(could not determine)'}")
     log(f"[Manual] Location: {location or '(unknown)'}")
 
+    # url/linkedin_url both get the same value: the other scrapers use url
+    # for the resolved apply URL and linkedin_url for the listing URL as a
+    # stable dedup key (see resume_pipeline.is_already_logged), but a manual
+    # entry only ever has the one URL the user gave, so it fills both roles.
     job = {
         "title": title,
         "company": company,
