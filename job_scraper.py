@@ -33,6 +33,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
+from dedup_common import pairs_match
+
 load_dotenv()
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
@@ -207,18 +209,7 @@ def already_applied(job, applied_pairs, applied_urls):
 
     company = re.sub(r'\s+', ' ', job.get("company", "").strip()).lower()
     title   = normalize_title(job.get("title", "")).lower()
-
-    if (company, title) in applied_pairs:
-        return True
-
-    for (ac, at) in applied_pairs:
-        if ac and company and (ac in company or company in ac):
-            t_words  = set(title.split())
-            at_words = set(at.split())
-            if len(t_words & at_words) >= 2:
-                return True
-
-    return False
+    return pairs_match(company, title, applied_pairs)
 
 
 # ── LINKEDIN SCRAPER ───────────────────────────────────────────────────────────
@@ -885,6 +876,11 @@ def scrape_linkedin(keywords, location, applied_pairs, applied_urls):
                 filter_and_keep(page_jobs)
                 print(f"   Candidates so far: {len(candidates)}")
 
+                # Unlike collection pages (Phase 0/1), whose ?start= param LinkedIn
+                # silently ignores (fixed by switching those to Next-button clicks —
+                # see scrape_collection), search pages genuinely paginate via ?start=,
+                # so zero cards here really does mean the last page was reached, not
+                # a duplicate-detection false positive.
                 if not page_jobs:
                     print("   No new jobs on this page — stopping search")
                     break
@@ -987,6 +983,10 @@ def extract_job_from_card(card, return_reason=False, title_filters=None):
         return reason if return_reason else None
 
     # ── Try CSS selectors first ──
+    # Multiple selectors per field because LinkedIn runs several card layouts
+    # concurrently (classic search results, collection-page cards, older
+    # cached markup) and swaps build-hashed class names between deployments —
+    # same rationale as the JS fallback below, just cheaper to try first.
     title = (text("a.job-card-list__title")
              or text("a.job-card-container__link")
              or text("a.job-card-list__title--link")

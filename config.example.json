@@ -9,6 +9,8 @@
   "builtin_url": "https://builtin.com/jobs/remote?search=your+role&country=USA&allLocations=true",
   "dynamite_enabled": false,
   "dynamite_url": "https://dynamitejobs.com/remote-jobs?text=your+role",
+  "indeed_enabled": false,
+  "indeed_url": "https://www.indeed.com/jobs?q=your+role&l=Remote",
   "title_keywords": [],
   "excluded_titles": [],
   "excluded_title_words": [],

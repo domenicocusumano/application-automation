@@ -218,6 +218,11 @@
     transition: background 0.15s, opacity 0.15s; display: none; }
   #relogin-builtin-btn:hover { background: #ef4444; }
   #relogin-builtin-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #relogin-indeed-btn { background: #f87171; color: #0f0f17; border: none; border-radius: 6px;
+    padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: background 0.15s, opacity 0.15s; display: none; }
+  #relogin-indeed-btn:hover { background: #ef4444; }
+  #relogin-indeed-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   #log, #manual-log {
     flex: 1;
@@ -401,6 +406,11 @@
       <div class="session-dot" id="builtin-session-dot"></div>
       <span id="builtin-session-label">Checking Built-in session...</span>
       <button id="relogin-builtin-btn" onclick="startBuiltinRelogin()">Re-login Built-in</button>
+    </div>
+    <div class="session-control">
+      <div class="session-dot" id="indeed-session-dot"></div>
+      <span id="indeed-session-label">Checking Indeed session...</span>
+      <button id="relogin-indeed-btn" onclick="startIndeedRelogin()">Re-login Indeed</button>
     </div>
   </div>
   <div id="log"><span class="dim">Output will appear here...</span></div>
@@ -600,6 +610,24 @@
       <div class="field-desc">Paste your dynamitejobs.com search results page URL here (either <code style="color:#71717a">/my-jobs?text=...</code> or the public <code style="color:#71717a">/remote-jobs?text=...</code> — only the search text is used, so either works the same). Pagination and filtering beyond the text search aren't replicated yet.</div>
       <input type="text" id="dynamite-url-input" class="url-input"
              placeholder="https://dynamitejobs.com/remote-jobs?text=...">
+    </div>
+  </div>
+
+  <!-- ── Indeed ── -->
+  <div class="settings-section">
+    <div class="settings-section-title">Indeed</div>
+    <div class="settings-field">
+      <label class="checkbox-label">
+        <input type="checkbox" id="indeed-enabled-cb" onchange="updateRunBtnState()">
+        Enable Indeed scraper
+      </label>
+      <div class="field-desc">When enabled, Run Pipeline scrapes Indeed instead of the others — only one scraper runs per pipeline execution. Candidates are scored with Claude, resumes are built for jobs above the score threshold, and results are written to the Google Sheet, same as the other scrapers. Without logging in, Indeed caps results to page 1 (~15 jobs) and gates the real "Apply on company site" URL behind its own sign-in wall — use <strong style="color:#a1a1aa">Re-login Indeed</strong> above to see more pages and resolve real apply URLs.</div>
+    </div>
+    <div class="settings-field">
+      <span class="field-label">Search URL</span>
+      <div class="field-desc">Paste your indeed.com job search results page URL here.</div>
+      <input type="text" id="indeed-url-input" class="url-input"
+             placeholder="https://www.indeed.com/jobs?q=...&l=Remote">
     </div>
   </div>
 
@@ -838,8 +866,14 @@
 
     const builtinEnabled = document.getElementById('builtin-enabled-cb').checked;
     const dynamiteEnabled = document.getElementById('dynamite-enabled-cb').checked;
+    const indeedEnabled = document.getElementById('indeed-enabled-cb').checked;
 
-    if (!builtinEnabled && !dynamiteEnabled) {
+    // Only LinkedIn's session is required to run — Built-in/Dynamite/Indeed
+    // each show their own session indicator (see checkBuiltinSession() etc.)
+    // but degrade gracefully without one (fewer results / listing-URL
+    // fallback) rather than blocking the run, so this gate only applies when
+    // none of them are enabled (i.e. the LinkedIn scraper is what's about to run).
+    if (!builtinEnabled && !dynamiteEnabled && !indeedEnabled) {
       status.textContent = 'Checking session...';
       status.className = '';
       await checkSession();
@@ -904,6 +938,10 @@
     return document.getElementById('dynamite-enabled-cb').checked;
   }
 
+  function indeedActive() {
+    return document.getElementById('indeed-enabled-cb').checked;
+  }
+
   async function checkSession() {
     const dot      = document.getElementById('session-dot');
     const label    = document.getElementById('session-label');
@@ -924,14 +962,14 @@
         dot.className = 'session-dot invalid';
         label.textContent = 'Session expired — re-login required';
         relogin.style.display = 'inline-block';
-        if (!builtinActive() && !dynamiteActive()) runBtn.disabled = true;
+        if (!builtinActive() && !dynamiteActive() && !indeedActive()) runBtn.disabled = true;
       }
     } catch (e) {
       sessionValid = false;
       dot.className = 'session-dot invalid';
       label.textContent = 'Could not check session';
       relogin.style.display = 'inline-block';
-      if (!builtinActive() && !dynamiteActive()) runBtn.disabled = true;
+      if (!builtinActive() && !dynamiteActive() && !indeedActive()) runBtn.disabled = true;
     }
   }
 
@@ -1022,6 +1060,62 @@
     };
   }
 
+  async function checkIndeedSession() {
+    const dot     = document.getElementById('indeed-session-dot');
+    const label   = document.getElementById('indeed-session-label');
+    const relogin = document.getElementById('relogin-indeed-btn');
+    dot.className = 'session-dot';
+    label.textContent = 'Checking Indeed session...';
+    try {
+      const r = await fetch('/check-indeed-session');
+      const data = await r.json();
+      if (data.valid) {
+        dot.className = 'session-dot valid';
+        label.textContent = 'Indeed session active';
+        relogin.style.display = 'none';
+      } else {
+        dot.className = 'session-dot invalid';
+        label.textContent = 'Indeed: ' + data.reason;
+        relogin.style.display = 'inline-block';
+      }
+    } catch (e) {
+      dot.className = 'session-dot invalid';
+      label.textContent = 'Could not check Indeed session';
+      relogin.style.display = 'inline-block';
+    }
+  }
+
+  let reloginIndeedEs = null;
+
+  function startIndeedRelogin() {
+    if (reloginIndeedEs) return;
+    const reloginBtn = document.getElementById('relogin-indeed-btn');
+    const label      = document.getElementById('indeed-session-label');
+    const log        = document.getElementById('log');
+    reloginBtn.disabled = true;
+    label.textContent = 'Opening browser — log in to Indeed in the window that appeared...';
+    log.innerHTML = '';
+
+    reloginIndeedEs = new EventSource('/relogin-indeed');
+    reloginIndeedEs.onmessage = (e) => {
+      const line = e.data;
+      if (line === '[DONE]') {
+        reloginIndeedEs.close(); reloginIndeedEs = null;
+        reloginBtn.disabled = false;
+        checkIndeedSession();
+        return;
+      }
+      log.innerHTML += esc(line) + '\n';
+      log.scrollTop = log.scrollHeight;
+      label.textContent = line;
+    };
+    reloginIndeedEs.onerror = () => {
+      reloginIndeedEs.close(); reloginIndeedEs = null;
+      reloginBtn.disabled = false;
+      label.textContent = 'Re-login failed — check terminal';
+    };
+  }
+
   // ── CONFIG ─────────────────────────────────────────────────────────────────
   let configLoaded = false;
 
@@ -1039,6 +1133,8 @@
       document.getElementById('builtin-url-input').value         = data.builtin_url || '';
       document.getElementById('dynamite-enabled-cb').checked     = data.dynamite_enabled;
       document.getElementById('dynamite-url-input').value        = data.dynamite_url || '';
+      document.getElementById('indeed-enabled-cb').checked       = data.indeed_enabled;
+      document.getElementById('indeed-url-input').value          = data.indeed_url || '';
       // Title Filters
       const titleKws   = data.title_keywords       || [];
       const exclTitles = data.excluded_titles      || [];
@@ -1059,7 +1155,7 @@
       document.getElementById('scoring-model-select').value        = data.scoring_model        || 'claude-sonnet-5';
       document.getElementById('resume-model-select').value         = data.resume_model         || 'claude-sonnet-5';
       document.getElementById('resume-output-format-select').value = data.resume_output_format || 'docx';
-      if (data.builtin_enabled || data.dynamite_enabled) {
+      if (data.builtin_enabled || data.dynamite_enabled || data.indeed_enabled) {
         document.getElementById('run-btn').disabled = false;
       }
       configLoaded = true;
@@ -1069,7 +1165,7 @@
   }
 
   function updateRunBtnState() {
-    if (builtinActive() || dynamiteActive()) {
+    if (builtinActive() || dynamiteActive() || indeedActive()) {
       document.getElementById('run-btn').disabled = false;
     } else {
       checkSession();
@@ -1096,6 +1192,8 @@
     const builtinUrl         = document.getElementById('builtin-url-input').value.trim();
     const dynamiteEnabled    = document.getElementById('dynamite-enabled-cb').checked;
     const dynamiteUrl        = document.getElementById('dynamite-url-input').value.trim();
+    const indeedEnabled      = document.getElementById('indeed-enabled-cb').checked;
+    const indeedUrl          = document.getElementById('indeed-url-input').value.trim();
     // Title Filters
     const titleKeywords      = document.getElementById('title-keywords-input').value
                                  .split('\n').map(s => s.trim()).filter(Boolean);
@@ -1136,6 +1234,8 @@
           builtin_url:          builtinUrl,
           dynamite_enabled:     dynamiteEnabled,
           dynamite_url:         dynamiteUrl,
+          indeed_enabled:       indeedEnabled,
+          indeed_url:           indeedUrl,
           title_keywords:       titleKeywords,
           excluded_titles:      excludedTitles,
           excluded_title_words: excludedTitleWords,
@@ -1167,7 +1267,7 @@
   loadPrompt('background');
   loadResume();
   // Load config first so builtin-enabled state is known before checkSession touches runBtn.
-  (async () => { await loadConfig(); await checkSession(); await checkBuiltinSession(); })();
+  (async () => { await loadConfig(); await checkSession(); await checkBuiltinSession(); await checkIndeedSession(); })();
 </script>
 </body>
 </html>

@@ -5,6 +5,7 @@ oauth_credentials.json
 gdrive_token.json
 linkedin_session.json
 builtin_session.json
+indeed_session.json
 
 # ── Personal config (copy config.example.json → config.json and fill in) ────
 config.json

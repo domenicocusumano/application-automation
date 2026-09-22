@@ -29,8 +29,16 @@ load_dotenv()
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY")
 
-PIPELINE_OUTPUT    = "pipeline_output.json"   # Auto mode input file
-HEADLESS           = False    # False = see the browser, True = run hidden
+# Auto mode input file — NOTE: nothing in this codebase currently writes this
+# file. resume_pipeline.py logs results straight to the Google Sheet / Drive
+# instead of a local JSON handoff, so auto mode (no --manual flag) will exit
+# immediately below with "file not found" until something produces it again.
+# Use --manual with MANUAL_JOBS for now.
+PIPELINE_OUTPUT    = "pipeline_output.json"
+# False so a human can watch the fill happen, solve CAPTCHAs, and use
+# PAUSE_BEFORE_SUBMIT — headless also weakens the stealth patches below
+# (some bot-detection checks specifically look for the headless flag itself).
+HEADLESS           = False
 PAUSE_BEFORE_SUBMIT = True    # True = ask for confirmation before each submit
 DRY_RUN            = True     # True = fill but do not submit (safe testing mode)
 
@@ -139,6 +147,11 @@ MANUAL_JOBS = [
 def get_field_mapping(html_content, job_title, company_name, client):
     """
     Send page HTML to Claude and get back a field mapping: selector → value
+
+    Model is hardcoded here (and in review_filled_form / advance_to_application_form)
+    rather than read from config.json like resume_pipeline.py's scoring_model /
+    resume_model — this file predates that config-driven pattern and hasn't been
+    migrated to it.
     """
     applicant_name = f"{APPLICANT.get('first_name', '')} {APPLICANT.get('last_name', '')}".strip()
     prompt = f"""You are filling out a job application form for {applicant_name}.
@@ -199,7 +212,7 @@ Always apply these answers exactly — match the closest available option in the
 """
 
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=4000,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -250,7 +263,7 @@ If ready is false, list the issues. Do not mark as ready if there are obvious pr
 """
 
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -714,7 +727,7 @@ If selector cannot be determined, set it to null. If href cannot be determined, 
 No other text."""
 
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -972,7 +985,7 @@ def run_applications(jobs):
             else:
                 stats["failed"] += 1
 
-            time.sleep(2)  # Pause between applications
+            time.sleep(2)  # Pace back-to-back applications so the traffic pattern looks less bot-like
 
         browser.close()
 

@@ -42,19 +42,27 @@ load_dotenv()
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
 
+SCRIPT_DIR          = os.path.dirname(os.path.abspath(__file__))
+
+# Credential/session file paths are resolved against SCRIPT_DIR, not the
+# process's cwd — matches indeed_scraper.py's convention and CONFIG_FILE
+# below. In practice cwd is always SCRIPT_DIR already (app.py's subprocess
+# spawns set cwd explicitly, and standalone runs are documented as `cd` into
+# the project dir first), but this makes a relative env var override safe
+# regardless. os.path.join is a no-op if the env var supplies an absolute
+# path, so absolute overrides still work.
 ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KEY")
-GOOGLE_CREDS_FILE   = os.getenv("GOOGLE_CREDS_FILE",   "google_credentials.json")
+GOOGLE_CREDS_FILE   = os.path.join(SCRIPT_DIR, os.getenv("GOOGLE_CREDS_FILE", "google_credentials.json"))
 GDRIVE_FOLDER_ID    = os.getenv("GDRIVE_FOLDER_ID",    "")
 
 # OAuth 2.0 credentials for Drive uploads (personal account — service accounts
 # have no storage quota and cannot upload files to personal My Drive).
 # oauth_credentials.json  → downloaded from Google Cloud Console (Desktop app type)
 # gdrive_token.json       → auto-created on first run, reused on every run after
-GDRIVE_OAUTH_CREDS  = os.getenv("GDRIVE_OAUTH_CREDS",  "oauth_credentials.json")
-GDRIVE_TOKEN_FILE   = os.getenv("GDRIVE_TOKEN_FILE",   "gdrive_token.json")
+GDRIVE_OAUTH_CREDS  = os.path.join(SCRIPT_DIR, os.getenv("GDRIVE_OAUTH_CREDS", "oauth_credentials.json"))
+GDRIVE_TOKEN_FILE   = os.path.join(SCRIPT_DIR, os.getenv("GDRIVE_TOKEN_FILE", "gdrive_token.json"))
 GDRIVE_OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
-SCRIPT_DIR          = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE         = os.path.join(SCRIPT_DIR, "config.json")
 
 
@@ -236,6 +244,23 @@ def _builtin_job_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _indeed_job_key(url: str) -> str:
+    """The vjk/jk param from an Indeed URL — its real identity. Mirrors
+    indeed_scraper._indeed_job_key. An Indeed listing's identity lives in the
+    query string, which normalize_url strips, so every Indeed URL collapses to
+    a bare "indeed.com/jobs"; dedup by this key instead. Returns '' for
+    non-Indeed URLs."""
+    from urllib.parse import urlparse, parse_qs
+    u = (url or "").lower()
+    if "indeed.com" not in u:
+        return ""
+    try:
+        qs = parse_qs(urlparse(u).query)
+    except Exception:
+        return ""
+    return (qs.get("vjk", qs.get("jk", [""]))[0] or "").strip()
+
+
 def load_applied_from_sheet(service):
     """
     Reads the Applications + Skips tabs fresh from the Sheet and returns
@@ -270,6 +295,14 @@ def load_applied_from_sheet(service):
 
                 for col in ["URL", "Linked In URL"]:
                     val  = row.get(col, "")
+                    ijk = _indeed_job_key(val)
+                    if ijk:
+                        # Indeed URL: key only, never the normalized (query-
+                        # stripped) URL — see _indeed_job_key. Adding the
+                        # normalized form poisons the set with a bare
+                        # "indeed.com/jobs" that matches every Indeed job.
+                        applied_urls.add(f"indeed-jk:{ijk}")
+                        continue
                     norm = normalize_url(val)
                     if norm and norm.startswith("http"):
                         applied_urls.add(norm)
@@ -286,6 +319,12 @@ def is_already_logged(job: dict, applied_pairs: set, applied_urls: set) -> bool:
     """Returns True if this job's URL or Linked In URL already appears in the sheet."""
     for field in ["url", "linkedin_url"]:
         val  = job.get(field, "")
+        ijk = _indeed_job_key(val)
+        if ijk:
+            # Indeed URL: key only, never normalize_url — see _indeed_job_key.
+            if f"indeed-jk:{ijk}" in applied_urls:
+                return True
+            continue
         norm = normalize_url(val)
         if norm and norm in applied_urls:
             return True
@@ -543,13 +582,17 @@ def fetch_job_description(page, url):
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
             time.sleep(2)
         except Exception as e:
-            # Fallback: Try requests library if Playwright fails (download trigger, etc.)
+            # Some ATS job pages serve the JD as a direct PDF/file download rather
+            # than an HTML page — Playwright treats that as a failed navigation and
+            # raises an error whose message contains "Download" instead of loading
+            # the page, so page.goto() never completes. requests can still fetch
+            # the raw bytes without triggering Playwright's download handling.
             if "Download" in str(e):
                 print(f"      Playwright blocked by download, trying requests fallback...")
                 try:
                     import requests
                     headers = {
-                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
                     }
                     response = requests.get(url, headers=headers, timeout=10)
                     print(f"      Requests status: {response.status_code}, Content-Type: {response.headers.get('Content-Type', 'unknown')}")
@@ -800,6 +843,11 @@ def build_resume_content(client, job, job_description, score_data, model="claude
             "Upload your resume (.pdf or .docx) via the web UI."
         )
 
+    # PDF goes to Claude as a native "document" content block (base64) — the
+    # Messages API can read PDF layout/formatting directly. There is no
+    # equivalent document block type for .docx, so it's extracted to plain
+    # text instead and sent as a text block; formatting is lost but the
+    # bullet content Claude needs to work from is preserved.
     if resume_path.endswith(".pdf"):
         with open(resume_path, "rb") as f:
             resume_content_block = {
@@ -1043,7 +1091,12 @@ data.experience.forEach(role => {
 // ── ENTREPRENEURSHIP ──
 if (data.entrepreneurship) {
   children.push(sectionHeading('Entrepreneurship'));
-  // Parse header: expect "Title | Company | Location | Dates" or just a string
+  // Unlike experience[], which has structured title/company/location/dates
+  // fields, entrepreneurship.header is one freeform string Claude writes —
+  // it doesn't fit the regular role shape (e.g. "Founder ... | Disci.io |
+  // Miami, FL  Ongoing" has no separate title/dates split). Parse it by
+  // however many '|'-delimited parts actually came back rather than
+  // requiring a fixed shape.
   const hdr = data.entrepreneurship.header || '';
   const hdrParts = hdr.split('|').map(s => s.trim());
   if (hdrParts.length >= 4) {
@@ -1137,7 +1190,7 @@ Packer.toBuffer(doc).then(buf => {
 
 # ── MAIN PIPELINE ──────────────────────────────────────────────────────────────
 
-def run_pipeline(jobs, test_scoring_only=False):
+def run_pipeline(jobs, test_scoring_only=False, resolve_apply_url=None):
     """
     Main pipeline. Accepts a list of job dicts with keys: title, company, location, url.
     Scores each, builds resumes for score >= score_threshold, uploads to Drive.
@@ -1145,6 +1198,19 @@ def run_pipeline(jobs, test_scoring_only=False):
     Args:
         jobs: List of job dicts
         test_scoring_only: If True, skips resume building and only tests scoring + sheet logging
+        resolve_apply_url: optional callable(job, playwright) -> str | None, invoked
+            only for jobs that clear the score threshold, right before the resume
+            build. If it returns a URL, job["url"] is replaced with it before the
+            Applications row is written. Lets a scraper defer an expensive or
+            rate-limited apply-URL lookup (Indeed's /applystart redirect) until it
+            actually matters, instead of paying for it on every candidate.
+
+    Job dict flags honored here:
+        _use_scraped_description: use job["description"] as the JD directly and
+            skip fetching it from job["url"]/job["linkedin_url"]. Set by scrapers
+            that already read the JD off the live page — re-fetching would be a
+            wasted, and for Indeed a Cloudflare-scored, hit from this pipeline's
+            browser, which carries none of the scraper's session cookies.
     """
     # Re-read config at run time so settings changes take effect without restart
     pipeline_cfg       = _load_pipeline_config()
@@ -1189,7 +1255,7 @@ def run_pipeline(jobs, test_scoring_only=False):
         # Create context with realistic browser fingerprint to avoid bot detection
         context_options = {
             "viewport": {"width": 1920, "height": 1080},
-            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         }
 
         if os.path.exists(SESSION_FILE):
@@ -1222,7 +1288,14 @@ def run_pipeline(jobs, test_scoring_only=False):
             jd = ""
             closed = False
 
-            if url:
+            scraped_desc = job.get("description", "")
+            if job.get("_use_scraped_description") and len(scraped_desc) > 200:
+                # Scraper read this off the live page moments ago (see the
+                # docstring) — also skips the closed-posting check, which
+                # only makes sense for a page we'd be loading fresh.
+                jd = scraped_desc
+                print(f"      Using JD captured by the scraper ({len(jd)} chars) — not re-fetching")
+            elif url:
                 jd = fetch_job_description(page, url)
                 # Checked independently of `jd` — a closed-posting notice is
                 # often short enough ("Job not found") that none of
@@ -1323,6 +1396,19 @@ def run_pipeline(jobs, test_scoring_only=False):
                         results.append({**job, "score": score, "assessment": assessment, "resume_built": False, "drive_link": None})
                         print()
                         continue
+
+                # Deferred apply-URL lookup — only now that this job has earned
+                # it (see docstring). Failure keeps the listing URL; never blocks
+                # the build.
+                if resolve_apply_url and not test_scoring_only:
+                    try:
+                        resolved = resolve_apply_url(job, p)
+                    except Exception as e:
+                        print(f"      Apply URL resolution errored ({str(e).splitlines()[0][:100]}) — keeping listing URL")
+                        resolved = None
+                    if resolved:
+                        job["url"] = resolved
+                        result["url"] = resolved
 
                 if test_scoring_only:
                     print(f"      Score >= {score_threshold} -- would build resume (skipped in test mode)")

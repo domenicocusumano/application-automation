@@ -127,6 +127,8 @@ async def get_config():
         "builtin_url":            config.get("builtin_url", ""),
         "dynamite_enabled":       config.get("dynamite_enabled", False),
         "dynamite_url":           config.get("dynamite_url", ""),
+        "indeed_enabled":         config.get("indeed_enabled", False),
+        "indeed_url":             config.get("indeed_url", ""),
         "title_keywords":         config.get("title_keywords",        _DEFAULT_TITLE_KEYWORDS),
         "excluded_titles":        config.get("excluded_titles",        _DEFAULT_EXCLUDED_TITLES),
         "excluded_title_words":   config.get("excluded_title_words",   _DEFAULT_EXCLUDED_TITLE_WORDS),
@@ -152,6 +154,8 @@ class ConfigBody(BaseModel):
     builtin_url: str = ""
     dynamite_enabled: bool = False
     dynamite_url: str = ""
+    indeed_enabled: bool = False
+    indeed_url: str = ""
     title_keywords: List[str] = []
     excluded_titles: List[str] = []
     excluded_title_words: List[str] = []
@@ -178,6 +182,8 @@ async def save_config(body: ConfigBody):
     config["builtin_url"]          = body.builtin_url
     config["dynamite_enabled"]     = body.dynamite_enabled
     config["dynamite_url"]         = body.dynamite_url
+    config["indeed_enabled"]       = body.indeed_enabled
+    config["indeed_url"]           = body.indeed_url
     config["title_keywords"]       = body.title_keywords
     config["excluded_titles"]      = body.excluded_titles
     config["excluded_title_words"] = body.excluded_title_words
@@ -207,8 +213,16 @@ async def check_builtin_session():
     return JSONResponse({"valid": valid, "reason": reason})
 
 
+@app.get("/check-indeed-session")
+async def check_indeed_session():
+    from indeed_scraper import check_indeed_session as _check
+    valid, reason = _check()
+    return JSONResponse({"valid": valid, "reason": reason})
+
+
 _relogin_lock = asyncio.Lock()
 _relogin_builtin_lock = asyncio.Lock()
+_relogin_indeed_lock = asyncio.Lock()
 
 
 def _relogin_stream(script_name: str, lock: asyncio.Lock):
@@ -246,6 +260,11 @@ async def relogin_builtin():
     return _relogin_stream("relogin_builtin.py", _relogin_builtin_lock)
 
 
+@app.get("/relogin-indeed")
+async def relogin_indeed():
+    return _relogin_stream("relogin_indeed.py", _relogin_indeed_lock)
+
+
 _pipeline_proc = None
 
 
@@ -269,12 +288,22 @@ async def run_pipeline():
             return
         async with _run_lock:
             config = _read_config()
-            if config.get("dynamite_enabled", False):
+            # Only one scraper runs per pipeline execution — the UI enforces
+            # "enable exactly one" client-side, but this priority order is the
+            # server-side tie-breaker if more than one flag is ever set.
+            if config.get("indeed_enabled", False):
+                cmd = ["python3", "-u", "indeed_scraper.py"]
+            elif config.get("dynamite_enabled", False):
                 cmd = ["python3", "-u", "dynamite_scraper.py"]
             elif config.get("builtin_enabled", False):
                 cmd = ["python3", "-u", "builtin_scraper.py"]
             else:
                 cmd = ["python3", "-u", "job_scraper.py", "--resume"]
+            # start_new_session=True puts this subprocess (and everything it
+            # spawns, e.g. Playwright's browser) in its own process group,
+            # detached from uvicorn's — so /cancel's terminate() below reliably
+            # kills the whole scraper run without depending on signal
+            # propagation through the server process.
             _pipeline_proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
