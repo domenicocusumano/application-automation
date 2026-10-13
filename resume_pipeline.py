@@ -467,6 +467,15 @@ def log_job_to_sheet(job, score, assessment, tab_name="Applications", drive_link
         print(f"      Error details: {traceback.format_exc()}")
 
 
+# Drive stores whatever bytes we send but labels the file with the mimetype we
+# declare — so a hardcoded docx type on a real .pdf produced a file named
+# ".pdf" that Drive treated (and previewed) as a Word doc. Pick by extension.
+_UPLOAD_MIMETYPES = {
+    ".pdf":  "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
 def upload_to_drive(filepath, filename, folder_id=None):
     """Uploads a file to the configured Google Drive folder.
     Uses OAuth 2.0 (personal account) so the file lands in your own Drive quota."""
@@ -474,10 +483,9 @@ def upload_to_drive(filepath, filename, folder_id=None):
         _folder = folder_id or _load_pipeline_config().get("gdrive_folder_id") or GDRIVE_FOLDER_ID
         service  = get_drive_service()
         metadata = {"name": filename, "parents": [_folder] if _folder else []}
-        media    = MediaFileUpload(
-            filepath,
-            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+        ext      = os.path.splitext(filename)[1].lower()
+        mimetype = _UPLOAD_MIMETYPES.get(ext, _UPLOAD_MIMETYPES[".docx"])
+        media    = MediaFileUpload(filepath, mimetype=mimetype)
         file = service.files().create(
             body=metadata,
             media_body=media,
@@ -1233,7 +1241,12 @@ def run_pipeline(jobs, test_scoring_only=False, resolve_apply_url=None):
         print("  (Resume building DISABLED for testing)")
     print(f"{'='*65}\n")
 
-    client   = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # max_retries above the SDK default of 2: a resume-build request is long,
+    # and a transient mid-stream disconnect (RemoteProtocolError → APIConnection
+    # Error) on a flaky link or a sleeping laptop would otherwise exhaust the
+    # default retries and crash the whole run. The per-job guards below catch
+    # anything that still gets through so one job's failure can't lose the rest.
+    client   = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=5)
     results  = []
     built    = 0
 
@@ -1365,7 +1378,15 @@ def run_pipeline(jobs, test_scoring_only=False, resolve_apply_url=None):
 
             # 2. Score + hard disqualification checks
             print("      Scoring with Claude...")
-            score_data        = score_job(client, job, jd, salary_minimum, preferred_locs, model=scoring_model)
+            # A Claude connection failure here shouldn't kill the whole run —
+            # skip just this job (not logged to the sheet, so dedup lets the
+            # next run retry it) and move on to the rest.
+            try:
+                score_data = score_job(client, job, jd, salary_minimum, preferred_locs, model=scoring_model)
+            except anthropic.APIError as e:
+                print(f"      Claude API error while scoring ({type(e).__name__}) — skipping this job, will retry next run")
+                print()
+                continue
             score             = score_data.get("score", 0)
             assessment        = score_data.get("assessment", "")
             salary_disqualify = score_data.get("salary_disqualify", False)
@@ -1416,7 +1437,15 @@ def run_pipeline(jobs, test_scoring_only=False, resolve_apply_url=None):
                 else:
                     print(f"      Score >= {score_threshold} -- building resume...")
 
-                    resume_data = build_resume_content(client, job, jd, score_data, model=resume_model)
+                    # Same per-job guard as scoring: a connection failure here
+                    # skips this job without writing it to the sheet, so the
+                    # next run retries it rather than losing every other job.
+                    try:
+                        resume_data = build_resume_content(client, job, jd, score_data, model=resume_model)
+                    except anthropic.APIError as e:
+                        print(f"      Claude API error while building resume ({type(e).__name__}) — skipping this job, will retry next run")
+                        print()
+                        continue
                     drive_link  = None
 
                     if resume_data:

@@ -223,6 +223,7 @@ async def check_indeed_session():
 _relogin_lock = asyncio.Lock()
 _relogin_builtin_lock = asyncio.Lock()
 _relogin_indeed_lock = asyncio.Lock()
+_verify_builtin_lock = asyncio.Lock()
 
 
 def _relogin_stream(script_name: str, lock: asyncio.Lock):
@@ -263,6 +264,13 @@ async def relogin_builtin():
 @app.get("/relogin-indeed")
 async def relogin_indeed():
     return _relogin_stream("relogin_indeed.py", _relogin_indeed_lock)
+
+
+@app.get("/verify-builtin")
+async def verify_builtin():
+    # Reuses the same visible-browser subprocess+SSE plumbing as relogin — it
+    # opens a window, streams progress, and saves builtin_session.json on exit.
+    return _relogin_stream("verify_builtin.py", _verify_builtin_lock)
 
 
 _pipeline_proc = None

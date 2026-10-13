@@ -436,7 +436,7 @@ async def scrape_job_detail(page, job_url: str, tracker: "RateLimitTracker") -> 
     result = {
         "company": "", "location": "", "description": "",
         "easy_apply": False, "apply_url": job_url, "login_required": False,
-        "blocked": False,
+        "verify_required": False, "blocked": False,
     }
     # True once the apply URL / Easy Apply flag come from the embedded
     # jobPostInit payload, which outranks every DOM heuristic below.
@@ -511,10 +511,21 @@ async def scrape_job_detail(page, job_url: str, tracker: "RateLimitTracker") -> 
                             continue
 
                         location = resp.headers.get("location", "")
+                        loc_low  = location.lower()
                         resolved = _external_apply_url(location, job_url)
                         if resolved:
                             external = resolved
-                        elif "applyrequired" in location.lower():
+                        elif "verifyphone" in loc_low:
+                            # Checked live 2026-09-30: Built-in added a phone-
+                            # verification gate AFTER login. A logged-in but
+                            # phone-unverified session's apply redirect now lands
+                            # on "?verifyPhone=true" (where a logged-OUT session
+                            # still lands on "?applyRequired=true"). The real
+                            # apply URL is withheld until the Built-in account
+                            # completes phone verification — nothing the scraper
+                            # can do from here, so flag it distinctly.
+                            result["verify_required"] = True
+                        elif "applyrequired" in loc_low:
                             # Built-in only reveals this job's real apply URL to a
                             # logged-in account — without a valid session there's
                             # nothing more to try (the DOM fallback below won't
@@ -833,7 +844,10 @@ async def scrape_job_detail(page, job_url: str, tracker: "RateLimitTracker") -> 
         # and the Built-in listing URL was written to the sheet as if it were
         # the real apply link.
         if not result["easy_apply"] and result["apply_url"] == job_url:
-            if result["login_required"]:
+            if result["verify_required"]:
+                log(f"    [warn] Built-in now requires PHONE VERIFICATION on your account before it reveals this apply URL — "
+                    f"verify your phone at builtin.com then click 'Re-login Built-in'. Falling back to Built-in URL: {job_url}")
+            elif result["login_required"]:
                 log(f"    [warn] Built-in requires a logged-in session to reveal this apply URL — falling back to Built-in URL: {job_url}")
             else:
                 log(f"    [warn] no external apply URL found — falling back to Built-in URL: {job_url}")
