@@ -218,6 +218,11 @@
     transition: background 0.15s, opacity 0.15s; display: none; }
   #relogin-builtin-btn:hover { background: #ef4444; }
   #relogin-builtin-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #verify-builtin-btn { background: #fbbf24; color: #0f0f17; border: none; border-radius: 6px;
+    padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: background 0.15s, opacity 0.15s; }
+  #verify-builtin-btn:hover { background: #f59e0b; }
+  #verify-builtin-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   #relogin-indeed-btn { background: #f87171; color: #0f0f17; border: none; border-radius: 6px;
     padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
     transition: background 0.15s, opacity 0.15s; display: none; }
@@ -406,6 +411,7 @@
       <div class="session-dot" id="builtin-session-dot"></div>
       <span id="builtin-session-label">Checking Built-in session...</span>
       <button id="relogin-builtin-btn" onclick="startBuiltinRelogin()">Re-login Built-in</button>
+      <button id="verify-builtin-btn" onclick="startBuiltinVerify()" style="display:none">Verify Built-in Phone</button>
     </div>
     <div class="session-control">
       <div class="session-dot" id="indeed-session-dot"></div>
@@ -816,6 +822,7 @@
     status.className = 'running';
     log.innerHTML = '';
 
+    builtinVerifyPrompted = false;
     manualEs = new EventSource('/manual-upload?url=' + encodeURIComponent(url));
 
     manualEs.onmessage = (e) => {
@@ -828,6 +835,17 @@
       }
       log.innerHTML += colorize(line);
       log.scrollTop = log.scrollHeight;
+
+      // Built-in now gates apply URLs behind a one-time phone verification.
+      // The moment the scraper reports it, surface the Verify button and
+      // auto-open the verification browser once (it won't help THIS run — the
+      // session refreshes for the next one — but it saves the user a manual
+      // hunt). Guarded so it fires only once per run.
+      if (line.includes('PHONE VERIFICATION') && !builtinVerifyPrompted) {
+        builtinVerifyPrompted = true;
+        document.getElementById('verify-builtin-btn').style.display = 'inline-block';
+        if (!verifyBuiltinEs) startBuiltinVerify();
+      }
 
       if (line.startsWith('── Process exited with code')) {
         const code = parseInt(line.match(/code (\d+)/)?.[1] ?? '0');
@@ -892,6 +910,7 @@
     status.className = 'running';
     log.innerHTML = '';
 
+    builtinVerifyPrompted = false;
     es = new EventSource('/run');
 
     es.onmessage = (e) => {
@@ -904,6 +923,17 @@
       }
       log.innerHTML += colorize(line);
       log.scrollTop = log.scrollHeight;
+
+      // Built-in now gates apply URLs behind a one-time phone verification.
+      // The moment the scraper reports it, surface the Verify button and
+      // auto-open the verification browser once (it won't help THIS run — the
+      // session refreshes for the next one — but it saves the user a manual
+      // hunt). Guarded so it fires only once per run.
+      if (line.includes('PHONE VERIFICATION') && !builtinVerifyPrompted) {
+        builtinVerifyPrompted = true;
+        document.getElementById('verify-builtin-btn').style.display = 'inline-block';
+        if (!verifyBuiltinEs) startBuiltinVerify();
+      }
 
       if (line.startsWith('── Process exited with code')) {
         const code = parseInt(line.match(/code (\d+)/)?.[1] ?? '0');
@@ -1008,6 +1038,7 @@
     const dot     = document.getElementById('builtin-session-dot');
     const label   = document.getElementById('builtin-session-label');
     const relogin = document.getElementById('relogin-builtin-btn');
+    const verify  = document.getElementById('verify-builtin-btn');
     dot.className = 'session-dot';
     label.textContent = 'Checking Built-in session...';
     try {
@@ -1022,6 +1053,12 @@
         label.textContent = 'Built-in: ' + data.reason;
         relogin.style.display = 'inline-block';
       }
+      // The Verify button is not a persistent control — the cookie check can't
+      // tell "verified" from "merely logged in". It appears only when a run
+      // hits the verifyPhone gate (see the run-log handler) and is hidden again
+      // the moment verify_builtin.py reports success ([VERIFIED]). So a page
+      // load never shows it: no button = nothing to verify right now.
+      verify.style.display = 'none';
     } catch (e) {
       dot.className = 'session-dot invalid';
       label.textContent = 'Could not check Built-in session';
@@ -1057,6 +1094,60 @@
       reloginBuiltinEs.close(); reloginBuiltinEs = null;
       reloginBtn.disabled = false;
       label.textContent = 'Re-login failed — check terminal';
+    };
+  }
+
+  let verifyBuiltinEs = null;
+  let builtinVerifyPrompted = false;  // reset each run; auto-opens verify once per run
+  let builtinVerified = false;        // set when verify_builtin.py reports [VERIFIED]
+
+  // Opens a visible browser to complete Built-in's one-time phone verification.
+  // Auto-triggered when the scraper reports the verifyPhone gate (see the run
+  // log handler), and also available as a manual button.
+  function startBuiltinVerify() {
+    if (verifyBuiltinEs) return;
+    const verifyBtn = document.getElementById('verify-builtin-btn');
+    const label     = document.getElementById('builtin-session-label');
+    const log       = document.getElementById('log');
+    verifyBtn.disabled = true;
+    verifyBtn.style.display = 'inline-block';
+    label.style.color = '';  // clear any prior green "verified" state
+    label.textContent = 'Opening browser — complete Built-in phone verification in the window that appeared...';
+
+    builtinVerified = false;
+    verifyBuiltinEs = new EventSource('/verify-builtin');
+    verifyBuiltinEs.onmessage = (e) => {
+      const line = e.data;
+      if (line === '[VERIFIED]') {
+        // Success — hide the button for good and show a confirmation. Don't
+        // let the [DONE] handler below re-show it.
+        builtinVerified = true;
+        verifyBtn.style.display = 'none';
+        label.textContent = '✓ Built-in phone verified — apply URLs will resolve on the next run';
+        label.style.color = '#4ade80';
+        return;
+      }
+      if (line === '[DONE]') {
+        verifyBuiltinEs.close(); verifyBuiltinEs = null;
+        if (builtinVerified) {
+          // Keep the green "✓ verified" label — don't re-run the session check,
+          // which would overwrite it with the generic status.
+          verifyBtn.style.display = 'none';
+        } else {
+          // Timed out / not confirmed — leave the button so they can retry.
+          verifyBtn.disabled = false;
+          checkBuiltinSession();
+        }
+        return;
+      }
+      log.innerHTML += esc(line) + '\n';
+      log.scrollTop = log.scrollHeight;
+      label.textContent = line;
+    };
+    verifyBuiltinEs.onerror = () => {
+      verifyBuiltinEs.close(); verifyBuiltinEs = null;
+      verifyBtn.disabled = false;
+      label.textContent = 'Verification helper failed — check terminal';
     };
   }
 
